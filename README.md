@@ -8,6 +8,8 @@ Projects have an energy tag (which mode they belong to) and a priority (P1–P3)
 which determines the order they appear in on the Call screen.
 
 No tasks. No accounts. No backend. Projects persist in `localStorage`.
+Dark mode follows the OS preference by default; toggle (`◐` top-left of the
+Check-in screen) persists once clicked.
 
 ## Stack
 

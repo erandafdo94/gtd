@@ -4,14 +4,39 @@ type Energy = 'high' | 'med' | 'low'
 type Priority = 1 | 2 | 3
 type TimeKey = 'quick' | 'chunk' | 'deep'
 type Screen = 'checkin' | 'call' | 'timer' | 'done' | 'settings'
-type Project = { id: number; name: string; energy: Energy; priority: Priority }
+type Project = { id: number; name: string; energy: Energy; priority: Priority; avgBlock: TimeKey }
 
 const STORAGE_KEY = 'focus_projects'
 const LEGACY_KEY = 'focus_areas'
 
 const TIME_MIN: Record<TimeKey, number> = { quick: 15, chunk: 40, deep: 55 }
 const ENERGY_DOWN: Record<Energy, Energy> = { high: 'med', med: 'low', low: 'low' }
-const MODE_COLOR: Record<Energy, string> = { high: '#d97757', med: '#6a7fb5', low: '#5b8c7a' }
+const MODE_COLOR: Record<Energy, string> = {
+  high: 'var(--mode-high)',
+  med:  'var(--mode-med)',
+  low:  'var(--mode-low)',
+}
+const THEME_KEY = 'focus_theme'
+type ThemeChoice = 'light' | 'dark'
+
+function getInitialTheme(): ThemeChoice {
+  try {
+    const fromAttr = document.documentElement.dataset.theme
+    if (fromAttr === 'light' || fromAttr === 'dark') return fromAttr
+    const saved = localStorage.getItem(THEME_KEY)
+    if (saved === 'light' || saved === 'dark') return saved
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      return 'dark'
+    }
+  } catch {
+    // ignore
+  }
+  return 'light'
+}
 const MODE_META: Record<Energy, { label: string; tip: string }> = {
   high: { label: 'Deep Work', tip: 'Phone in another room. One tab. Go.' },
   med:  { label: 'Steady',    tip: 'Close email. Pick one goal.' },
@@ -19,12 +44,12 @@ const MODE_META: Record<Energy, { label: string; tip: string }> = {
 }
 
 const SEED: Project[] = [
-  { id: 1, name: 'Main project',        energy: 'high', priority: 1 },
-  { id: 2, name: 'Side build',          energy: 'high', priority: 2 },
-  { id: 3, name: 'Learning / courses',  energy: 'med',  priority: 1 },
-  { id: 4, name: 'Reading & notes',     energy: 'med',  priority: 2 },
-  { id: 5, name: 'Admin & inbox',       energy: 'low',  priority: 2 },
-  { id: 6, name: 'Quick errands',       energy: 'low',  priority: 3 },
+  { id: 1, name: 'Main project',        energy: 'high', priority: 1, avgBlock: 'deep'  },
+  { id: 2, name: 'Side build',          energy: 'high', priority: 2, avgBlock: 'chunk' },
+  { id: 3, name: 'Learning / courses',  energy: 'med',  priority: 1, avgBlock: 'chunk' },
+  { id: 4, name: 'Reading & notes',     energy: 'med',  priority: 2, avgBlock: 'chunk' },
+  { id: 5, name: 'Admin & inbox',       energy: 'low',  priority: 2, avgBlock: 'quick' },
+  { id: 6, name: 'Quick errands',       energy: 'low',  priority: 3, avgBlock: 'quick' },
 ]
 
 const TIME_OPTIONS: { key: TimeKey; label: string }[] = [
@@ -34,6 +59,17 @@ const TIME_OPTIONS: { key: TimeKey; label: string }[] = [
 ]
 const ENERGY_ORDER: Energy[] = ['low', 'med', 'high']
 const PRIORITIES: Priority[] = [1, 2, 3]
+const BLOCK_ORDER: TimeKey[] = ['quick', 'chunk', 'deep']
+const AVG_LABEL: Record<TimeKey, string> = { quick: '15m', chunk: '40m', deep: '55m' }
+
+function fitCount(avg: TimeKey, block: TimeKey): number {
+  return Math.floor(TIME_MIN[block] / TIME_MIN[avg])
+}
+
+function nextBlock(b: TimeKey): TimeKey {
+  const i = BLOCK_ORDER.indexOf(b)
+  return BLOCK_ORDER[(i + 1) % BLOCK_ORDER.length]
+}
 
 function loadProjects(): Project[] {
   try {
@@ -50,6 +86,7 @@ function loadProjects(): Project[] {
         name: x.name,
         energy: x.energy,
         priority: (x.priority === 1 || x.priority === 2 || x.priority === 3) ? x.priority : 2,
+        avgBlock: (x.avgBlock === 'quick' || x.avgBlock === 'chunk' || x.avgBlock === 'deep') ? x.avgBlock : 'chunk',
       }))
     return cleaned.length ? cleaned : SEED
   } catch {
@@ -96,7 +133,7 @@ const styles = {
     minHeight: 440,
     display: 'flex',
     flexDirection: 'column',
-    color: '#2a2a28',
+    color: 'var(--ink)',
     fontFamily: 'ui-sans-serif, system-ui, sans-serif',
   } as CSSProperties,
   topBar: {
@@ -109,7 +146,7 @@ const styles = {
   navBtn: {
     background: 'transparent',
     border: 'none',
-    color: '#7a7a76',
+    color: 'var(--text-body)',
     fontSize: 20,
     width: 44,
     height: 44,
@@ -120,13 +157,13 @@ const styles = {
     borderRadius: 22,
   } as CSSProperties,
   projectsBtn: {
-    background: '#ffffff',
-    border: '1.5px solid #e0ded7',
+    background: 'var(--surface)',
+    border: '1.5px solid var(--border-ghost)',
     borderRadius: 22,
     padding: '0 16px',
     fontSize: 14,
     fontWeight: 600,
-    color: '#5a5a56',
+    color: 'var(--text-on-chip)',
     display: 'inline-flex',
     alignItems: 'center',
     gap: 6,
@@ -138,7 +175,7 @@ const styles = {
     fontWeight: 700,
     letterSpacing: 1.5,
     textTransform: 'uppercase',
-    color: '#b0aea6',
+    color: 'var(--text-faint)',
     marginBottom: 12,
   } as CSSProperties,
   h: {
@@ -152,7 +189,7 @@ const styles = {
     fontWeight: 600,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-    color: '#9a9a95',
+    color: 'var(--text-label)',
     marginBottom: 10,
     display: 'block',
   } as CSSProperties,
@@ -169,9 +206,9 @@ const styles = {
     fontSize: 14,
     fontWeight: 700,
     borderRadius: 12,
-    border: `2px solid ${active ? activeColor : '#e6e4dd'}`,
-    background: active ? activeColor : '#ffffff',
-    color: active ? '#ffffff' : '#6a6a66',
+    border: `2px solid ${active ? activeColor : 'var(--border-chip)'}`,
+    background: active ? activeColor : 'var(--surface)',
+    color: active ? '#ffffff' : 'var(--text-chip-mid)',
     textAlign: 'center',
     transition: 'all 0.12s',
   }),
@@ -181,9 +218,9 @@ const styles = {
     fontSize: 14,
     fontWeight: 600,
     borderRadius: 22,
-    border: `2px solid ${active ? activeColor : '#e6e4dd'}`,
-    background: active ? activeColor : '#ffffff',
-    color: active ? '#ffffff' : '#5a5a56',
+    border: `2px solid ${active ? activeColor : 'var(--border-chip)'}`,
+    background: active ? activeColor : 'var(--surface)',
+    color: active ? '#ffffff' : 'var(--text-on-chip)',
     transition: 'all 0.12s',
     display: 'inline-flex',
     alignItems: 'center',
@@ -207,7 +244,7 @@ const styles = {
     borderRadius: 12,
     border: 'none',
     color: '#ffffff',
-    background: disabled ? '#dcdad3' : (color ?? '#2a2a28'),
+    background: disabled ? 'var(--disabled-bg)' : (color ?? 'var(--btn-neutral)'),
     cursor: disabled ? 'not-allowed' : 'pointer',
     marginTop: 'auto',
   }),
@@ -217,21 +254,22 @@ const styles = {
     fontSize: 14,
     fontWeight: 600,
     borderRadius: 12,
-    border: '1.5px solid #e0ded7',
+    border: '1.5px solid var(--border-ghost)',
     background: 'transparent',
-    color: '#7a7a76',
+    color: 'var(--text-body)',
   } as CSSProperties,
   input: {
     width: '100%',
     padding: '12px 14px',
     fontSize: 16,
     borderRadius: 12,
-    border: '1.5px solid #ddd',
-    background: '#ffffff',
+    border: '1.5px solid var(--border-input)',
+    background: 'var(--surface)',
+    color: 'var(--ink)',
     outline: 'none',
   } as CSSProperties,
   card: (color: string): CSSProperties => ({
-    background: '#faf9f5',
+    background: 'var(--card-bg)',
     border: `2px solid ${color}`,
     borderRadius: 14,
     padding: '16px 18px',
@@ -246,18 +284,18 @@ const styles = {
     marginBottom: 6,
   }),
   cardTip: {
-    color: '#7a7a76',
+    color: 'var(--text-body)',
     fontSize: 14,
     lineHeight: 1.4,
   } as CSSProperties,
   muted: {
-    color: '#b0aea6',
+    color: 'var(--text-faint)',
     fontSize: 14,
     marginBottom: 20,
   } as CSSProperties,
   projectRow: {
-    background: '#faf9f5',
-    border: '1px solid #e8e6df',
+    background: 'var(--card-bg)',
+    border: '1px solid var(--border-soft)',
     borderRadius: 10,
     padding: '10px 12px',
     marginBottom: 8,
@@ -269,7 +307,7 @@ const styles = {
     flex: 1,
     fontSize: 16,
     fontWeight: 500,
-    color: '#2a2a28',
+    color: 'var(--ink)',
     background: 'transparent',
     border: 'none',
     outline: 'none',
@@ -293,10 +331,34 @@ const styles = {
     justifyContent: 'center',
     flexShrink: 0,
   }),
+  blockCycle: {
+    background: 'var(--surface)',
+    color: 'var(--text-on-chip)',
+    border: '1.5px solid var(--border-soft)',
+    borderRadius: 10,
+    minWidth: 44,
+    height: 36,
+    padding: '0 8px',
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: 0.3,
+    lineHeight: 1,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  } as CSSProperties,
+  fitTag: (active: boolean): CSSProperties => ({
+    fontSize: 11,
+    fontWeight: 700,
+    opacity: active ? 0.7 : 0.55,
+    marginLeft: 2,
+    lineHeight: 1,
+  }),
   removeBtn: {
     background: 'transparent',
     border: 'none',
-    color: '#c0392b',
+    color: 'var(--danger)',
     fontSize: 18,
     fontWeight: 700,
     width: 44,
@@ -325,6 +387,7 @@ export default function App() {
   const [intention, setIntention] = useState('')
   const [secondsLeft, setSecondsLeft] = useState(0)
   const [paused, setPaused] = useState(false)
+  const [theme, setTheme] = useState<ThemeChoice>(getInitialTheme)
   const lastEnergyRef = useRef<Energy | null>(null)
   const endsAtRef = useRef<number>(0)
   const remainingMsRef = useRef<number>(0)
@@ -336,6 +399,20 @@ export default function App() {
       // ignore quota errors
     }
   }, [projects])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#1a1916' : '#f5f2e8')
+  }, [theme])
+
+  function toggleTheme() {
+    setTheme(t => {
+      const next: ThemeChoice = t === 'dark' ? 'light' : 'dark'
+      try { localStorage.setItem(THEME_KEY, next) } catch { /* ignore */ }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (screen !== 'timer' || paused) return
@@ -399,10 +476,23 @@ export default function App() {
     ))
   }
 
+  function cycleAvgBlock(id: number) {
+    setProjects(prev => prev.map(p =>
+      p.id === id ? { ...p, avgBlock: nextBlock(p.avgBlock) } : p
+    ))
+  }
+
   if (screen === 'checkin') return (
     <div style={styles.page}>
       <div style={styles.topBar}>
-        <span />
+        <button
+          style={styles.navBtn}
+          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          title="Toggle theme"
+          onClick={toggleTheme}
+        >
+          {theme === 'dark' ? '◑' : '◐'}
+        </button>
         <button style={styles.projectsBtn} onClick={() => setScreen('settings')}>
           <span style={{ fontSize: 14 }}>⚙</span> Projects
         </button>
@@ -428,7 +518,7 @@ export default function App() {
         {TIME_OPTIONS.map(t => (
           <button
             key={t.key}
-            style={styles.chip(time === t.key, '#2a2a28')}
+            style={styles.chip(time === t.key, 'var(--btn-neutral)')}
             onClick={() => setTime(t.key)}
           >
             {t.label}
@@ -450,9 +540,13 @@ export default function App() {
     const mode = MODE_META[energy]
     const color = MODE_COLOR[energy]
     const mins = TIME_MIN[time]
-    const matching = projects
-      .filter(p => p.energy === energy)
+    const allEnergyMatches = projects.filter(p => p.energy === energy)
+    const matching = allEnergyMatches
+      .filter(p => fitCount(p.avgBlock, time) >= 1)
       .sort((a, b) => a.priority - b.priority || a.id - b.id)
+    const emptyMsg = allEnergyMatches.length === 0
+      ? 'No projects for this energy yet — add some in Projects, or just start.'
+      : 'Nothing fits this time. Pick a longer block, or just start.'
 
     return (
       <div style={styles.page}>
@@ -472,6 +566,7 @@ export default function App() {
           <div style={styles.row}>
             {matching.map(p => {
               const active = projectId === p.id
+              const n = fitCount(p.avgBlock, time)
               return (
                 <button
                   key={p.id}
@@ -482,12 +577,13 @@ export default function App() {
                     P{p.priority}
                   </span>
                   {p.name}
+                  <span style={styles.fitTag(active)}>×{n}</span>
                 </button>
               )
             })}
           </div>
         ) : (
-          <div style={styles.muted}>No projects for this energy yet — add some in Projects, or just start.</div>
+          <div style={styles.muted}>{emptyMsg}</div>
         )}
 
         <span style={styles.label}>One thing (optional)</span>
@@ -522,7 +618,7 @@ export default function App() {
         </div>
 
         {intention.trim() && (
-          <div style={{ fontSize: 18, fontWeight: 600, color: '#3a3a37', marginBottom: 20 }}>
+          <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-strong)', marginBottom: 20 }}>
             {intention}
           </div>
         )}
@@ -567,7 +663,7 @@ export default function App() {
       <div style={{ ...styles.page, alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
         <div style={{ fontSize: 40, color, marginTop: 'auto' }}>✓</div>
         <h1 style={{ ...styles.h, marginTop: 16, marginBottom: 8 }}>Block done.</h1>
-        <div style={{ color: '#7a7a76', fontSize: 15, marginBottom: 32 }}>
+        <div style={{ color: 'var(--text-body)', fontSize: 15, marginBottom: 32 }}>
           Stand up, breathe, drink water.
         </div>
         <button style={styles.primary(color, false)} onClick={resetAll}>
@@ -605,16 +701,24 @@ export default function App() {
               {level} energy · {MODE_META[level].label}
             </div>
             {list.length === 0 ? (
-              <div style={{ color: '#b0aea6', fontSize: 14, marginBottom: 8 }}>none yet</div>
+              <div style={{ color: 'var(--text-faint)', fontSize: 14, marginBottom: 8 }}>none yet</div>
             ) : list.map(p => (
               <div key={p.id} style={styles.projectRow}>
                 <button
                   style={styles.priorityCycle(priorityShade(p.priority, color))}
-                  aria-label={`Priority ${p.priority}, click to cycle`}
-                  title="Click to cycle priority"
+                  aria-label={`Priority ${p.priority}, tap to cycle`}
+                  title="Tap to cycle priority"
                   onClick={() => cyclePriority(p.id)}
                 >
                   P{p.priority}
+                </button>
+                <button
+                  style={styles.blockCycle}
+                  aria-label={`Avg task ${AVG_LABEL[p.avgBlock]}, tap to cycle`}
+                  title="Tap to cycle avg task length"
+                  onClick={() => cycleAvgBlock(p.id)}
+                >
+                  {AVG_LABEL[p.avgBlock]}
                 </button>
                 <input
                   style={styles.projectInput}
@@ -637,13 +741,13 @@ export default function App() {
         )
       })}
 
-      <AddProject onAdd={(name, energy, priority) => {
+      <AddProject onAdd={(name, energy, priority, avgBlock) => {
         const nextId = projects.reduce((m, p) => Math.max(m, p.id), 0) + 1
-        setProjects(prev => [...prev, { id: nextId, name, energy, priority }])
+        setProjects(prev => [...prev, { id: nextId, name, energy, priority, avgBlock }])
       }} />
 
       <button
-        style={{ ...styles.primary('#2a2a28', false), marginTop: 24 }}
+        style={{ ...styles.primary('var(--btn-neutral)', false), marginTop: 24 }}
         onClick={() => setScreen('checkin')}
       >
         Done
@@ -652,18 +756,20 @@ export default function App() {
   )
 }
 
-function AddProject({ onAdd }: { onAdd: (name: string, energy: Energy, priority: Priority) => void }) {
+function AddProject({ onAdd }: { onAdd: (name: string, energy: Energy, priority: Priority, avgBlock: TimeKey) => void }) {
   const [name, setName] = useState('')
   const [energy, setEnergy] = useState<Energy | null>(null)
   const [priority, setPriority] = useState<Priority>(2)
+  const [avgBlock, setAvgBlock] = useState<TimeKey>('chunk')
 
   function submit() {
     const trimmed = name.trim()
     if (!trimmed || !energy) return
-    onAdd(trimmed, energy, priority)
+    onAdd(trimmed, energy, priority, avgBlock)
     setName('')
     setEnergy(null)
     setPriority(2)
+    setAvgBlock('chunk')
   }
 
   const ready = !!(name.trim() && energy)
@@ -691,14 +797,26 @@ function AddProject({ onAdd }: { onAdd: (name: string, energy: Energy, priority:
         ))}
       </div>
       <span style={styles.label}>Priority</span>
-      <div style={{ ...styles.row, marginBottom: 14 }}>
+      <div style={styles.row}>
         {PRIORITIES.map(p => (
           <button
             key={p}
-            style={styles.chip(priority === p, '#2a2a28')}
+            style={styles.chip(priority === p, 'var(--btn-neutral)')}
             onClick={() => setPriority(p)}
           >
             P{p}
+          </button>
+        ))}
+      </div>
+      <span style={styles.label}>Avg task length</span>
+      <div style={{ ...styles.row, marginBottom: 14 }}>
+        {TIME_OPTIONS.map(t => (
+          <button
+            key={t.key}
+            style={styles.chip(avgBlock === t.key, 'var(--btn-neutral)')}
+            onClick={() => setAvgBlock(t.key)}
+          >
+            {t.label}
           </button>
         ))}
       </div>
