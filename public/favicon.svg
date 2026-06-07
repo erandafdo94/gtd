@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Focus Router">
+  <title>Focus Router</title>
+  <desc>Three ascending pills in green, blue, and orange — the low, medium, and high energy modes.</desc>
+  <style>
+    .tile { fill: #faf9f5; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #24221d; }
+    }
+  </style>
+  <rect class="tile" width="256" height="256" rx="56" />
+  <rect x="46"  y="134" width="44" height="70"  rx="22" fill="#5b8c7a" />
+  <rect x="106" y="94"  width="44" height="110" rx="22" fill="#6a7fb5" />
+  <rect x="166" y="54"  width="44" height="150" rx="22" fill="#d97757" />
+</svg>
