@@ -1,44 +1,134 @@
 # Focus Router
 
-A tiny, single-page web app for sit-down focus. Tap your energy, tap how much
+A tiny single-page web app for sit-down focus. Tap your energy, tap how much
 time you have, and it routes you into a mode (Deep Work / Steady / Knock-outs)
-+ one of your pre-defined projects, then runs a focus timer.
+plus one of your pre-defined projects, then runs a focus timer.
 
-Projects have an energy tag (which mode they belong to) and a priority (P1–P3),
-which determines the order they appear in on the Call screen.
-
-No tasks. No accounts. No backend. Projects persist in `localStorage`.
-Dark mode follows the OS preference by default; toggle (`◐` top-left of the
-Check-in screen) persists once clicked.
+Projects, focus sessions, journal entries, saved words, and the current "main
+task" are persisted to a backend keyed on your Google account, so the same data
+follows you across devices. Theme preference and the Wikipedia "On This Day"
+cache stay local to each browser.
 
 ## Stack
 
-- React 18 + Vite + TypeScript
-- Plain React with inline styles (no UI library, no Tailwind)
-- Web Audio API for the completion chime
+- **Frontend**: React 18 + Vite + TypeScript, plain React with inline styles
+- **Backend**: ASP.NET Core 10 Minimal APIs, EF Core, Npgsql
+- **Database**: Postgres 16 (run locally via Docker Compose)
+- **Auth**: Google OAuth (ID-token flow) → app-issued JWT
 
 ## Develop
 
+### Prereqs
+
+- Node 20+
+- .NET 10 SDK
+- Docker (for the local Postgres)
+- A Google OAuth 2.0 Client ID (Web application, with `http://localhost:5173`
+  in **Authorized JavaScript origins**). Create one at
+  <https://console.cloud.google.com/apis/credentials>.
+
+> The backend lives in `../backend/` (its own git repo). The frontend and
+> backend are separate repos that sit side-by-side under `gtd/`.
+
+### One-time setup
+
 ```bash
+# Frontend deps
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # static files in dist/
-npm run preview  # serve the built site locally
+
+# Postgres (binds to 127.0.0.1:5433; adminer on :8081)
+cd ../backend
+docker compose up -d postgres
+
+# Backend DB schema
+dotnet ef database update --project FocusRouter.Api
+
+# Configure secrets — JWT signing key + Google client id
+dotnet user-secrets --project FocusRouter.Api \
+  set "Google:ClientId" "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
+
+cd ../frontend
 ```
 
-## Deploy
+Frontend env:
 
-`npm run build` emits `dist/`. Drop it on any static host:
+```bash
+cp .env.example .env
+# then fill in VITE_GOOGLE_CLIENT_ID (same client id as above)
+```
 
-- **Vercel** — `vercel deploy` (output dir: `dist`)
-- **Netlify** — `netlify deploy --dir=dist --prod`
-- **GitHub Pages** — push `dist/` to the `gh-pages` branch (e.g. `npx gh-pages -d dist`)
+### Run
 
-No env vars, no API keys, no server.
+Two terminals:
+
+```bash
+# Terminal 1 — API at http://localhost:5080
+cd ../backend
+dotnet run --project FocusRouter.Api
+
+# Terminal 2 — SPA at http://localhost:5173 (proxies /api → :5080)
+npm run dev
+```
+
+### Build
+
+```bash
+# from frontend/
+npm run build                                          # static SPA in dist/
+# from backend/
+dotnet publish FocusRouter.Api -c Release              # API binaries
+```
 
 ## Data
 
-Projects are stored under the `focus_projects` key in `localStorage` as a JSON
-array of `{ id, name, energy, priority }`. Edit them via the **⚙ Projects**
-button on the Check-in screen. Legacy `focus_areas` entries are migrated on
-first load (priority defaults to P2).
+All per-user data is stored in Postgres, scoped by user id. The following
+tables back the API: `users`, `user_flags`, `projects`, `parked_tasks`,
+`sessions`, `main_tasks`, `saved_words`, `journal_entries`. See
+[../specs/001-backend-auth/plan.md](../specs/001-backend-auth/plan.md) for the
+full data model and endpoint contract.
+
+Two things still live in the browser's `localStorage` on purpose:
+
+- `focus_theme` — your dark/light preference is per-device, not per-account.
+- `focus_otd` — a cache of today's Wikipedia "On This Day" event (refetched
+  daily; nothing to sync).
+
+The auth token is also held in `localStorage` under `focus_auth_token`.
+
+If you used the pre-backend version of the app, your existing `localStorage`
+data is uploaded to the server on first sign-in (one-shot) and then the
+legacy keys are cleared. If the server already has data for your account, the
+local copy is discarded — server data wins.
+
+## Spec-driven development
+
+This project uses [GitHub Spec Kit](https://github.com/github/spec-kit). The
+current feature spec, implementation plan, and tasks list live in the parent
+workspace at [../specs/001-backend-auth/](../specs/001-backend-auth).
+
+## Deploy (Railway)
+
+Three services in the same Railway project:
+
+1. **Postgres** — add Railway's Postgres plugin. It exposes `DATABASE_URL` to
+   any service in the project that references it.
+2. **API** — service deployed from the `backend` repo (separate from this
+   one — `../backend/` in the workspace). Root dir: repo root. Builder:
+   Dockerfile (auto-detected). Variables:
+   - `DATABASE_URL` — `${{Postgres.DATABASE_URL}}` (reference)
+   - `Jwt__Secret` — a long random string
+   - `Jwt__Issuer`, `Jwt__Audience` — e.g. `focus-router`
+   - `Google__ClientId` — your Google OAuth client id
+   - `CORS_ORIGINS` — the public URL of this frontend service
+   - Migrations run automatically on container start.
+3. **Frontend** — service deployed from this repo (Nixpacks autodetects Vite,
+   no Dockerfile needed).
+   - Variables (set at **build time**):
+     - `VITE_GOOGLE_CLIENT_ID` — same Google OAuth client id as the API
+     - `VITE_API_BASE_URL` — the public URL of the API service
+   - Add the frontend's public URL to your Google OAuth client's **Authorized
+     JavaScript origins** in Google Cloud Console.
+
+For local runs against the Railway Postgres, set `DATABASE_PUBLIC_URL` in
+your environment — the internal `*.railway.internal` host won't resolve from
+a laptop.

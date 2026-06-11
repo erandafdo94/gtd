@@ -3,203 +3,100 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#f3efe3" />
-    <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=3" />
+    <meta name="theme-color" content="#0b0c0f" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg?v=4" />
     <title>Focus Router</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
     <style>
-      :root, html[data-theme="light"] {
-        --page-bg:      #f3efe3;
-        --card-bg:      #fbfaf6;
-        --surface:      #ffffff;
-        --ink:          #2a2a28;
-        --text-strong:  #3a3a37;
-        --text-on-chip: #5a5a56;
-        --text-chip-mid:#6a6a66;
-        --text-body:    #7a7a76;
-        --text-label:   #9a9a95;
-        --text-faint:   #b0aea6;
-        --border-soft:  #e8e6df;
-        --border-chip:  #e6e4dd;
-        --border-input: #dddddd;
-        --border-ghost: #e0ded7;
-        --disabled-bg:  #dcdad3;
-        --btn-neutral:  #2a2a28;
-        --danger:       #c0392b;
-        --focus-ring:   #6a7fb5;
-        --mode-high:    #d97757;
-        --mode-med:     #6a7fb5;
-        --mode-low:     #5b8c7a;
-        --shadow-sm:    0 1px 2px rgba(42,42,40,0.05), 0 1px 1px rgba(42,42,40,0.04);
-        --shadow-md:    0 2px 4px rgba(42,42,40,0.06), 0 6px 16px rgba(42,42,40,0.06);
-        --shadow-lg:    0 4px 10px rgba(42,42,40,0.07), 0 12px 32px rgba(42,42,40,0.08);
-        --tint-strong:  rgba(42,42,40,0.04);
-        color-scheme: light;
-      }
-      html[data-theme="dark"] {
-        --page-bg:      #1a1917;
-        --card-bg:      #221f1c;
-        --surface:      #272320;
-        --ink:          #ece9e2;
-        --text-strong:  #ddd9d0;
-        --text-on-chip: #c4c0b6;
-        --text-chip-mid:#a8a399;
-        --text-body:    #918d83;
-        --text-label:   #79756c;
-        --text-faint:   #5f5c54;
-        --border-soft:  #34302b;
-        --border-chip:  #3a352f;
-        --border-input: #3f3a34;
-        --border-ghost: #312d28;
-        --disabled-bg:  #2e2a25;
-        --btn-neutral:  #ece9e2;
-        --danger:       #e06a5c;
-        --focus-ring:   #8a9cca;
-        --mode-high:    #e58a6c;
-        --mode-med:     #8497cf;
-        --mode-low:     #74a691;
-        --shadow-sm:    0 1px 2px rgba(0,0,0,0.30);
-        --shadow-md:    0 2px 6px rgba(0,0,0,0.35), 0 8px 20px rgba(0,0,0,0.30);
-        --shadow-lg:    0 6px 16px rgba(0,0,0,0.40), 0 16px 40px rgba(0,0,0,0.38);
-        --tint-strong:  rgba(255,255,255,0.04);
+      /* FOCUS ROUTER — Console design system.
+         Sharp · data-forward · friendly-geometric · dark only.
+         DM Sans (UI) + Space Mono (data). One electric pop: #ff5a36. */
+      :root {
+        /* surfaces — near-black canvas, layered graphite panels */
+        --bg:         #0b0c0f;
+        --bg-deep:    #07080a;
+        --surface:    #14161b;
+        --surface-2:  #1b1e25;
+        --surface-3:  #23272f;
+        --hair:       #262a33;
+        --line:       #323742;
+
+        /* ink */
+        --text:       #edeef2;
+        --text-2:     #b4b8c2;
+        --dim:        #888d99;
+        --faint:      #5b606c;
+
+        /* the one accent */
+        --accent:     #ff5a36;
+        --accent-2:   #ff7a5c;
+        --accent-ink: #0b0c0f;
+        --accent-soft:#ff5a3622;
+        --accent-line:#ff5a3659;
+        --accent-glow:rgba(255,90,54,0.40);
+
+        /* data deltas */
+        --up:   #34d6a4;
+        --down: #ff5d6e;
+
+        /* form */
+        --r-card: 15px;
+        --r-ctrl: 10px;
+        --shadow:      0 1px 0 rgba(0,0,0,.5), 0 14px 34px -18px rgba(0,0,0,.8);
+        --shadow-lift: 0 2px 0 rgba(0,0,0,.5), 0 26px 60px -24px rgba(0,0,0,.9);
+
+        --sans: "DM Sans", system-ui, -apple-system, sans-serif;
+        --mono: "Space Mono", ui-monospace, "SF Mono", monospace;
         color-scheme: dark;
       }
+
       * { box-sizing: border-box; }
-      html, body, #root { margin: 0; padding: 0; }
-      html, body { min-height: 100%; }
+      html, body { margin: 0; padding: 0; }
       body {
-        background: var(--page-bg);
-        color: var(--ink);
-        font-family: ui-sans-serif, system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
-        transition: background-color 240ms ease;
+        font-feature-settings: "ss01" on;
       }
-      #root { min-height: 100vh; }
+      #root { min-height: 100vh; position: relative; }
+
+      /* techy canvas: faint dot grid + a single warm glow up top */
+      body::before {
+        content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+        background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
+        background-size: 22px 22px;
+        -webkit-mask-image: radial-gradient(130% 80% at 50% -10%, #000 40%, transparent 100%);
+                mask-image: radial-gradient(130% 80% at 50% -10%, #000 40%, transparent 100%);
+      }
+      body::after {
+        content: ""; position: fixed; top: -240px; left: 50%; transform: translateX(-50%);
+        width: 900px; height: 520px; pointer-events: none; z-index: 0;
+        background: radial-gradient(ellipse at center, rgba(255,90,54,0.10), transparent 68%);
+        filter: blur(8px);
+      }
+
       button { font-family: inherit; cursor: pointer; }
-      input { font-family: inherit; color: var(--ink); }
-      :focus { outline: none; }
-      :focus-visible {
-        outline: 2px solid var(--focus-ring);
+      input, select, textarea { font-family: inherit; }
+      ::placeholder { color: var(--faint); }
+      button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+        outline: 2px solid var(--accent);
         outline-offset: 2px;
-        border-radius: 4px;
       }
-      .fr-grid {
-        display: grid;
-        grid-template-columns: 1.7fr 1fr;
-        gap: 20px;
-        align-items: start;
-      }
-      .fr-statstrip {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        gap: 12px;
-      }
+      ::selection { background: var(--accent-soft); color: var(--text); }
+      select { color-scheme: dark; }
 
-      /* === App shell with sidebar === */
-      .fr-shell {
-        display: grid;
-        grid-template-columns: 232px minmax(0, 1fr);
-        min-height: 100vh;
-        min-height: 100dvh;
-      }
-      .fr-sidebar {
-        position: sticky;
-        top: 0;
-        align-self: start;
-        height: 100vh;
-        height: 100dvh;
-        background: var(--card-bg);
-        border-right: 1px solid var(--border-soft);
-        padding: 24px 16px;
-        padding-top: max(24px, env(safe-area-inset-top, 24px));
-        padding-bottom: max(24px, env(safe-area-inset-bottom, 24px));
-        display: flex;
-        flex-direction: column;
-        z-index: 50;
-      }
-      .fr-main {
-        min-width: 0;
-        width: 100%;
-        max-width: 1080px;
-        margin: 0 auto;
-        padding: 24px 32px 48px;
-        padding-top: max(24px, env(safe-area-inset-top, 24px));
-        padding-bottom: max(48px, env(safe-area-inset-bottom, 48px));
-      }
-      .fr-mobile-topbar { display: none; }
-      .fr-backdrop {
-        display: none;
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.42);
-        z-index: 49;
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 220ms ease;
-      }
-
-      @media (max-width: 760px) {
-        .fr-grid { grid-template-columns: 1fr; gap: 16px; }
-        .fr-statstrip { grid-template-columns: 1fr 1fr 1fr; }
-        .fr-topbar { padding-left: 4px !important; padding-right: 4px !important; }
-
-        .fr-shell { grid-template-columns: 1fr; }
-        .fr-sidebar {
-          position: fixed;
-          inset: 0 auto 0 0;
-          width: 280px;
-          max-width: 86vw;
-          height: 100dvh;
-          transform: translateX(-101%);
-          transition: transform 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
-          box-shadow: var(--shadow-lg);
-        }
-        .fr-sidebar.fr-sidebar-open { transform: translateX(0); }
-        .fr-backdrop { display: block; }
-        .fr-backdrop.fr-backdrop-open {
-          opacity: 1;
-          pointer-events: auto;
-        }
-        .fr-mobile-topbar {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          margin-bottom: 20px;
-        }
-      }
-      /* entrance animations: transform-only so an inactive frame still shows content */
-      @keyframes fr-rise { from { transform: translateY(8px); } to { transform: none; } }
-      @keyframes fr-fade { from { transform: translateY(3px); } to { transform: none; } }
-      @keyframes fr-bloom {
-        0%   { opacity: 0; transform: scale(0.6); }
-        40%  { opacity: 0.5; }
-        100% { opacity: 0; transform: scale(2.4); }
-      }
-      @keyframes fr-tick { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-      @keyframes fr-eq { 0%,100% { transform: scaleY(0.35); } 50% { transform: scaleY(1); } }
-      .fr-anim-rise { animation: fr-rise 260ms cubic-bezier(0.2,0.7,0.2,1); }
-      .fr-anim-fade { animation: fr-fade 200ms ease; }
       @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after {
-          animation-duration: 0.001ms !important;
+          animation-duration: .001ms !important;
           animation-iteration-count: 1 !important;
-          transition-duration: 0.001ms !important;
+          transition-duration: .001ms !important;
         }
       }
     </style>
-    <script>
-      (function () {
-        try {
-          var saved = localStorage.getItem('focus_theme');
-          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-          var t = (saved === 'light' || saved === 'dark') ? saved : (prefersDark ? 'dark' : 'light');
-          document.documentElement.dataset.theme = t;
-          var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute('content', t === 'dark' ? '#1a1917' : '#f3efe3');
-        } catch (e) {}
-      })();
-    </script>
   </head>
   <body>
     <div id="root"></div>
