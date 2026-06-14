@@ -200,7 +200,7 @@ const ZERO_DAY: DayStats = { pomos: 0, mins: 0, complete: 0, partial: 0, distrac
 /* =====================================================================
    AUTH / SYNC (optional — Google Identity Services + state-blob backend)
    ===================================================================== */
-type AuthUser = { email: string; name?: string; picture?: string }
+type AuthUser = { email: string; name?: string; picture?: string; has_password?: boolean }
 type AuthState = { token: string; refreshToken: string; user: AuthUser }
 
 // Load the GIS client script once, on demand.
@@ -691,8 +691,8 @@ function InlineEdit({ value, onCommit, onCancel, style }: {
 function SideNav({
   view, onView, open, onClose, inboxCount, projectCount, footer,
 }: {
-  view: 'dashboard' | 'inbox' | 'projects'
-  onView: (v: 'dashboard' | 'inbox' | 'projects') => void
+  view: 'dashboard' | 'inbox' | 'projects' | 'settings'
+  onView: (v: 'dashboard' | 'inbox' | 'projects' | 'settings') => void
   open: boolean
   onClose: () => void
   inboxCount: number
@@ -712,7 +712,7 @@ function SideNav({
   const countStyle: CSSProperties = {
     ...mono, fontSize: 10.5, color: c.faint, fontVariantNumeric: 'tabular-nums', flexShrink: 0,
   }
-  const navItem = (key: 'dashboard' | 'inbox' | 'projects', glyph: string, label: string, count?: number): ReactNode => {
+  const navItem = (key: 'dashboard' | 'inbox' | 'projects' | 'settings', glyph: string, label: string, count?: number): ReactNode => {
     const active = view === key
     return (
       <button
@@ -741,6 +741,7 @@ function SideNav({
         {navItem('dashboard', '◎', 'Dashboard')}
         {navItem('inbox', '▣', 'Inbox', inboxCount)}
         {navItem('projects', '▦', 'Projects', projectCount)}
+        {navItem('settings', '⚙', 'Settings')}
       </nav>
       {footer}
     </aside>
@@ -753,7 +754,7 @@ function SideNav({
 export default function App() {
   const [state, setState] = useState<State>(DEFAULT_STATE)
   const [loaded, setLoaded] = useState(false)
-  const [view, setView] = useState<'dashboard' | 'inbox' | 'projects'>('dashboard')
+  const [view, setView] = useState<'dashboard' | 'inbox' | 'projects' | 'settings'>('dashboard')
   const [customize, setCustomize] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [statsOpen, setStatsOpen] = useState(false)
@@ -767,8 +768,8 @@ export default function App() {
   const [pwField, setPwField] = useState('')
   const [authErr, setAuthErr] = useState<string | null>(null)
   const [authBusy, setAuthBusy] = useState(false)
-  // "Set password" for the signed-in account (e.g. a Google user adding one).
-  const [pwAddOpen, setPwAddOpen] = useState(false)
+  // "Set password" for the signed-in account (e.g. a Google user adding one),
+  // surfaced inline on the Settings page.
   const [pwAddField, setPwAddField] = useState('')
   const [pwAddErr, setPwAddErr] = useState<string | null>(null)
   const [pwAddBusy, setPwAddBusy] = useState(false)
@@ -1005,11 +1006,9 @@ export default function App() {
     else closeSignIn()
   }
 
-  const openSetPw = () => { setPwAddField(''); setPwAddErr(null); setPwAddDone(false); setPwAddBusy(false); setPwAddOpen(true) }
-  const closeSetPw = () => { setPwAddOpen(false); setPwAddField(''); setPwAddErr(null); setPwAddBusy(false) }
-
   // Set/change the password on the signed-in account via the authenticated
-  // endpoint (handles 401-refresh through authedFetch).
+  // endpoint (handles 401-refresh through authedFetch). On success, flips the
+  // local user's has_password so the Settings page reflects it immediately.
   const submitSetPassword = async () => {
     if (pwAddField.length < 8) { setPwAddErr('Password must be at least 8 characters.'); return }
     setPwAddBusy(true)
@@ -1021,6 +1020,8 @@ export default function App() {
       })
       setPwAddBusy(false)
       if (!r || !r.ok) { setPwAddErr('Could not set your password — please try again.'); return }
+      const cur = authRef.current
+      if (cur) applyAuth({ ...cur, user: { ...cur.user, has_password: true } })
       setPwAddField('')
       setPwAddDone(true)
     } catch {
@@ -1169,13 +1170,26 @@ export default function App() {
     // a project (see the Clarify nudge in the Router card).
     const pool = openTasks.filter(t => t.basketId && !skipped.includes(t.id) && t.id !== timer.taskId)
     if (!pool.length) return null
+    const basketStatus = new Map(state.baskets.map(b => [b.id, b.status]))
+    // Priority is *tiered*, not a blend: a committed-for-today task always
+    // outranks any non-today task, ongoing projects outrank maintenance, and
+    // both outrank the rest (next/backlog/someday). Each tier is spaced far
+    // above the energy+age score (max ~230) so the tier ordering is absolute;
+    // energy match and staleness only break ties *within* a tier.
+    const TIER = 10000
+    const tierOf = (t: Task) => {
+      if (state.today.ids.includes(t.id)) return 4 // today's commitments, always first
+      switch (basketStatus.get(t.basketId!)) {
+        case 'ongoing': return 3
+        case 'maintenance': return 2
+        default: return 1 // next / backlog / someday
+      }
+    }
     const scored = pool.map(t => {
-      let s = 0
+      let s = tierOf(t) * TIER
       const gap = Math.abs(E_SCORE[t.energy] - E_SCORE[energy])
       s += (2 - gap) * 100
       s += Math.min(daysOld(t.createdAt), 10) * 3
-      // Committed-for-today picks outrank everything but a hard energy clash.
-      if (state.today.ids.includes(t.id)) s += 150
       return { t, s }
     }).sort((a, b) => b.s - a.s)
     const best = scored[0].t
@@ -1183,7 +1197,11 @@ export default function App() {
     const why = [
       `${best.mins}m`,
       best.energy + ' energy',
-      ...(state.today.ids.includes(best.id) ? ['today pick'] : []),
+      ...(state.today.ids.includes(best.id)
+        ? ['today pick']
+        : basket?.status === 'ongoing' ? ['ongoing']
+        : basket?.status === 'maintenance' ? ['maintenance']
+        : []),
       basket ? `from "${basket.name}"` : 'inbox',
       daysOld(best.createdAt) > 0 ? `${daysOld(best.createdAt)}d old` : 'added today',
     ]
@@ -1856,15 +1874,6 @@ export default function App() {
               }}
             >⏻</button>
           </div>
-          <button
-            onClick={openSetPw}
-            className="fr-press"
-            style={{
-              marginTop: 10, background: 'none', border: 'none', padding: 0,
-              color: c.dim, cursor: 'pointer', fontSize: 11, fontFamily: 'var(--sans)',
-              textDecoration: 'underline', textUnderlineOffset: 2,
-            }}
-          >Set a password</button>
         </div>
       ) : (
         <div key="acct-signin">
@@ -2021,7 +2030,7 @@ export default function App() {
         {/* ---------- header: page title + date ---------- */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
-            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : 'Projects'}
+            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : view === 'settings' ? 'Settings' : 'Projects'}
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button
@@ -2331,6 +2340,89 @@ export default function App() {
             </Card>
           )
         })()}
+
+        {/* ================= SETTINGS ================= */}
+        {view === 'settings' && (
+          <div style={{ maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <Card label="Account">
+              {!SYNC_ON ? (
+                <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.6 }}>
+                  Sync isn’t configured for this build, so there’s no account to manage.
+                  The app runs fully on this device.
+                </div>
+              ) : !auth ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div style={{ ...T.body, fontSize: 13.5, color: c.dim, lineHeight: 1.55 }}>
+                    You’re not signed in. Sign in to sync your tasks across devices —
+                    and to add an email/password login.
+                  </div>
+                  <div>
+                    <Btn variant="primary" onClick={() => setSignInOpen(true)}>Sign in to sync</Btn>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  {auth.user.picture && <img src={auth.user.picture} alt="" style={{ width: 40, height: 40, borderRadius: '50%', flexShrink: 0 }} />}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
+                    <div style={{ ...mono, fontSize: 11, color: c.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.email}</div>
+                  </div>
+                  <Btn variant="outline" size="sm" onClick={signOut}>Sign out</Btn>
+                </div>
+              )}
+            </Card>
+
+            {SYNC_ON && auth && (
+              <Card label="Password">
+                {(auth.user.has_password || pwAddDone) ? (
+                  <div style={{ ...T.body, fontSize: 13.5, color: c.text, lineHeight: 1.55 }}>
+                    <span style={{ color: c.up, fontWeight: 700 }}>✓ Password set.</span>{' '}
+                    You can log in with <b>{auth.user.email}</b> and your password on any device.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{ ...T.body, fontSize: 13, color: c.dim, lineHeight: 1.55 }}>
+                      Add an email/password login for <b style={{ color: c.text }}>{auth.user.email}</b>,
+                      so you can sign in without Google.
+                    </div>
+                    <form onSubmit={e => { e.preventDefault(); submitSetPassword() }} style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 340 }}>
+                      <input
+                        className="fr-in"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder="New password (min 8 characters)"
+                        value={pwAddField}
+                        onChange={e => setPwAddField(e.target.value)}
+                        style={{
+                          width: '100%', boxSizing: 'border-box', padding: '10px 12px',
+                          borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
+                          fontFamily: 'var(--sans)', fontSize: 14,
+                        }}
+                      />
+                      {pwAddErr && (
+                        <div style={{ ...T.body, fontSize: 12, color: c.down }}>{pwAddErr}</div>
+                      )}
+                      <div>
+                        <button
+                          type="submit"
+                          disabled={pwAddBusy}
+                          className="fr-btn"
+                          style={{
+                            padding: '10px 18px', borderRadius: 10,
+                            background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600,
+                            cursor: pwAddBusy ? 'default' : 'pointer', opacity: pwAddBusy ? 0.65 : 1,
+                          }}
+                        >
+                          {pwAddBusy ? 'Saving…' : 'Set password'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                )}
+              </Card>
+            )}
+          </div>
+        )}
 
         {/* ================= PROJECTS (4 lanes) ================= */}
         {view === 'projects' && (() => {
@@ -2714,91 +2806,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Set-password modal — for a signed-in user (e.g. Google) adding a password. */}
-      {pwAddOpen && auth && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Set a password"
-          onClick={closeSetPw}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-          }}
-        >
-          <div
-            className="fr-modal"
-            onClick={e => e.stopPropagation()}
-            style={{
-              width: 360, maxWidth: '100%', background: c.surface, border: `1px solid ${c.line}`,
-              borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-              <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>
-                Set a password
-              </h2>
-              <button
-                onClick={closeSetPw}
-                aria-label="Close"
-                className="fr-press"
-                style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
-              >×</button>
-            </div>
-
-            {pwAddDone ? (
-              <>
-                <div style={{ ...T.body, fontSize: 13, color: c.text, margin: '12px 0 18px', lineHeight: 1.5 }}>
-                  Password set. You can now log in with{' '}
-                  <b style={{ color: c.text }}>{auth.user.email}</b> and this password on any device.
-                </div>
-                <button
-                  onClick={closeSetPw}
-                  className="fr-btn"
-                  style={{ width: '100%', padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
-                >Done</button>
-              </>
-            ) : (
-              <>
-                <div style={{ ...mono, fontSize: 10, color: c.faint, marginBottom: 16, lineHeight: 1.5 }}>
-                  Adds email/password login for <b style={{ color: c.dim }}>{auth.user.email}</b>, alongside Google.
-                </div>
-                <form onSubmit={e => { e.preventDefault(); submitSetPassword() }}>
-                  <input
-                    className="fr-in"
-                    type="password"
-                    autoComplete="new-password"
-                    placeholder="New password (min 8 characters)"
-                    value={pwAddField}
-                    onChange={e => setPwAddField(e.target.value)}
-                    autoFocus
-                    style={{
-                      width: '100%', boxSizing: 'border-box', padding: '10px 12px',
-                      borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
-                      fontFamily: 'var(--sans)', fontSize: 14,
-                    }}
-                  />
-                  {pwAddErr && (
-                    <div style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{pwAddErr}</div>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={pwAddBusy}
-                    className="fr-btn"
-                    style={{
-                      width: '100%', marginTop: 14, padding: '10px 12px', borderRadius: 10,
-                      background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600,
-                      cursor: pwAddBusy ? 'default' : 'pointer', opacity: pwAddBusy ? 0.65 : 1,
-                    }}
-                  >
-                    {pwAddBusy ? 'Saving…' : 'Set password'}
-                  </button>
-                </form>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
