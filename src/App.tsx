@@ -767,6 +767,12 @@ export default function App() {
   const [pwField, setPwField] = useState('')
   const [authErr, setAuthErr] = useState<string | null>(null)
   const [authBusy, setAuthBusy] = useState(false)
+  // "Set password" for the signed-in account (e.g. a Google user adding one).
+  const [pwAddOpen, setPwAddOpen] = useState(false)
+  const [pwAddField, setPwAddField] = useState('')
+  const [pwAddErr, setPwAddErr] = useState<string | null>(null)
+  const [pwAddBusy, setPwAddBusy] = useState(false)
+  const [pwAddDone, setPwAddDone] = useState(false)
   const gisRef = useRef<HTMLDivElement | null>(null)
   const pulledRef = useRef(false)
   // "Sign in to sync" nudge for anonymous users — gentle + throttled.
@@ -997,6 +1003,30 @@ export default function App() {
     setAuthBusy(false)
     if (err) setAuthErr(err)
     else closeSignIn()
+  }
+
+  const openSetPw = () => { setPwAddField(''); setPwAddErr(null); setPwAddDone(false); setPwAddBusy(false); setPwAddOpen(true) }
+  const closeSetPw = () => { setPwAddOpen(false); setPwAddField(''); setPwAddErr(null); setPwAddBusy(false) }
+
+  // Set/change the password on the signed-in account via the authenticated
+  // endpoint (handles 401-refresh through authedFetch).
+  const submitSetPassword = async () => {
+    if (pwAddField.length < 8) { setPwAddErr('Password must be at least 8 characters.'); return }
+    setPwAddBusy(true)
+    setPwAddErr(null)
+    try {
+      const r = await authedFetch('/api/auth/set-password', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pwAddField }),
+      })
+      setPwAddBusy(false)
+      if (!r || !r.ok) { setPwAddErr('Could not set your password — please try again.'); return }
+      setPwAddField('')
+      setPwAddDone(true)
+    } catch {
+      setPwAddBusy(false)
+      setPwAddErr('Could not reach the server.')
+    }
   }
 
   // Exchange the refresh token for a fresh access token (and rotated refresh
@@ -1807,23 +1837,34 @@ export default function App() {
         // Distinct key from the sign-in branch so React unmounts the Google
         // button's <div> rather than reusing it — GIS injects DOM outside
         // React's knowledge, and a reused node keeps that orphaned button.
-        <div key="acct-user" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {auth.user.picture && <img src={auth.user.picture} alt="" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
-            <div style={{ ...mono, fontSize: 9.5, color: syncErr ? c.down : c.up }}>{syncErr ? 'sync paused' : 'synced'}</div>
+        <div key="acct-user">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {auth.user.picture && <img src={auth.user.picture} alt="" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
+              <div style={{ ...mono, fontSize: 9.5, color: syncErr ? c.down : c.up }}>{syncErr ? 'sync paused' : 'synced'}</div>
+            </div>
+            <button
+              onClick={signOut}
+              aria-label="Sign out"
+              title="Sign out"
+              className="fr-press"
+              style={{
+                width: 30, height: 30, borderRadius: 8, flexShrink: 0, padding: 0,
+                background: 'transparent', border: `1px solid ${c.hair}`,
+                color: c.dim, cursor: 'pointer', fontSize: 14, lineHeight: 1,
+              }}
+            >⏻</button>
           </div>
           <button
-            onClick={signOut}
-            aria-label="Sign out"
-            title="Sign out"
+            onClick={openSetPw}
             className="fr-press"
             style={{
-              width: 30, height: 30, borderRadius: 8, flexShrink: 0, padding: 0,
-              background: 'transparent', border: `1px solid ${c.hair}`,
-              color: c.dim, cursor: 'pointer', fontSize: 14, lineHeight: 1,
+              marginTop: 10, background: 'none', border: 'none', padding: 0,
+              color: c.dim, cursor: 'pointer', fontSize: 11, fontFamily: 'var(--sans)',
+              textDecoration: 'underline', textUnderlineOffset: 2,
             }}
-          >⏻</button>
+          >Set a password</button>
         </div>
       ) : (
         <div key="acct-signin">
@@ -2669,6 +2710,92 @@ export default function App() {
                 {authMode === 'login' ? 'Create one' : 'Log in'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Set-password modal — for a signed-in user (e.g. Google) adding a password. */}
+      {pwAddOpen && auth && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Set a password"
+          onClick={closeSetPw}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+          }}
+        >
+          <div
+            className="fr-modal"
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 360, maxWidth: '100%', background: c.surface, border: `1px solid ${c.line}`,
+              borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>
+                Set a password
+              </h2>
+              <button
+                onClick={closeSetPw}
+                aria-label="Close"
+                className="fr-press"
+                style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
+              >×</button>
+            </div>
+
+            {pwAddDone ? (
+              <>
+                <div style={{ ...T.body, fontSize: 13, color: c.text, margin: '12px 0 18px', lineHeight: 1.5 }}>
+                  Password set. You can now log in with{' '}
+                  <b style={{ color: c.text }}>{auth.user.email}</b> and this password on any device.
+                </div>
+                <button
+                  onClick={closeSetPw}
+                  className="fr-btn"
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+                >Done</button>
+              </>
+            ) : (
+              <>
+                <div style={{ ...mono, fontSize: 10, color: c.faint, marginBottom: 16, lineHeight: 1.5 }}>
+                  Adds email/password login for <b style={{ color: c.dim }}>{auth.user.email}</b>, alongside Google.
+                </div>
+                <form onSubmit={e => { e.preventDefault(); submitSetPassword() }}>
+                  <input
+                    className="fr-in"
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="New password (min 8 characters)"
+                    value={pwAddField}
+                    onChange={e => setPwAddField(e.target.value)}
+                    autoFocus
+                    style={{
+                      width: '100%', boxSizing: 'border-box', padding: '10px 12px',
+                      borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
+                      fontFamily: 'var(--sans)', fontSize: 14,
+                    }}
+                  />
+                  {pwAddErr && (
+                    <div style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{pwAddErr}</div>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={pwAddBusy}
+                    className="fr-btn"
+                    style={{
+                      width: '100%', marginTop: 14, padding: '10px 12px', borderRadius: 10,
+                      background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600,
+                      cursor: pwAddBusy ? 'default' : 'pointer', opacity: pwAddBusy ? 0.65 : 1,
+                    }}
+                  >
+                    {pwAddBusy ? 'Saving…' : 'Set password'}
+                  </button>
+                </form>
+              </>
+            )}
           </div>
         </div>
       )}
