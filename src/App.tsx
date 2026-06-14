@@ -15,8 +15,7 @@ import {
    ===================================================================== */
 type Energy = 'Low' | 'Med' | 'High'
 type Phase = 'idle' | 'work' | 'outcome' | 'break'
-type Layout = 'Paired' | 'Stacked' | 'Split'
-type WidgetId = 'word' | 'tip' | 'book' | 'habit' | 'btc' | 'stats'
+type WidgetId = 'word' | 'tip' | 'btc' | 'music'
 type Outcome = 'complete' | 'partial' | 'distracted'
 
 type Task = {
@@ -30,7 +29,8 @@ type Task = {
   doneAt?: number
 }
 
-type Basket = { id: string; name: string }
+type BasketStatus = 'ongoing' | 'next' | 'backlog' | 'someday'
+type Basket = { id: string; name: string; status: BasketStatus; color: string }
 
 type DayStats = {
   pomos: number
@@ -40,17 +40,16 @@ type DayStats = {
   distracted: number
 }
 
-type Habit = { name: string; days: Record<string, boolean> }
-
-type Tweaks = { layout: Layout; accent: string }
+type Tweaks = { accent: string }
 
 type State = {
   tasks: Task[]
   baskets: Basket[]
   widgets: Record<WidgetId, boolean>
-  habit: Habit
   stats: Record<string, DayStats>
   tweaks: Tweaks
+  /** Up to five task ids picked as today's focus. Resets each day. */
+  today: { date: string; ids: string[] }
 }
 
 type TimerState = {
@@ -103,49 +102,69 @@ const WORDS: [string, string][] = [
   ['wabi-sabi', 'finding beauty in imperfection and impermanence'],
   ['flow', 'complete absorption in an activity; time disappears'],
 ]
-const TIPS = [
-  'Park downhill: end each session by writing the very next step, so restarting is free.',
-  'If a task takes under 2 minutes, do it now instead of adding it.',
-  'Phone in another room beats willpower every time.',
-  'Batch your admin — context switching costs ~20 minutes per switch.',
-  "Decide tomorrow's first task tonight. Mornings are for doing, not choosing.",
-  'One tab. The rest are bookmarks for future-you.',
-  'Tired ≠ done. Tired = switch to low-energy tasks.',
+// Evidence-based learning techniques — one surfaces at random each session.
+const TIPS: [string, string][] = [
+  ['Active recall', 'test yourself instead of rereading — retrieval beats review'],
+  ['Spaced repetition', 'revisit material at growing intervals to beat the forgetting curve'],
+  ['The Feynman technique', 'explain it simply, as if teaching a child — the gaps reveal themselves'],
+  ['Interleaving', 'mix related topics in one session rather than blocking by subject'],
+  ['Teach to learn', "you don't fully understand it until you can explain it to someone else"],
+  ['Elaboration', 'ask why and how — tie new facts to what you already know'],
+  ['Dual coding', 'pair words with visuals — a diagram sticks better than text alone'],
+  ['Chunking', 'group small items into meaningful units to stretch working memory'],
 ]
-const BOOKS: [string, string][] = [
-  ['Deep Work', 'Cal Newport'],
-  ['Atomic Habits', 'James Clear'],
-  ['The Almanack of Naval Ravikant', 'Eric Jorgenson'],
-  ['Four Thousand Weeks', 'Oliver Burkeman'],
-  ['Essentialism', 'Greg McKeown'],
-  ['Make Time', 'Knapp & Zeratsky'],
-  ["So Good They Can't Ignore You", 'Cal Newport'],
+// Free 24/7 streams from somafm.com (listener-supported, attribution in the
+// card footer). <audio> playback needs no CORS, so these work from localhost.
+const STATIONS = [
+  { name: 'Fluid',        tag: 'lofi',  genre: 'instrumental hiphop', url: 'https://ice1.somafm.com/fluid-128-mp3' },
+  { name: 'Groove Salad', tag: 'chill', genre: 'ambient downtempo',   url: 'https://ice1.somafm.com/groovesalad-128-mp3' },
+  { name: 'Drone Zone',   tag: 'drone', genre: 'deep ambient',        url: 'https://ice1.somafm.com/dronezone-128-mp3' },
 ]
 
 const ENERGIES: Energy[] = ['Low', 'Med', 'High']
 const ACCENT_OPTIONS = ['#ff5a36', '#4f8cff', '#2ad17f', '#9a6bff']
-const LAYOUT_OPTIONS: Layout[] = ['Paired', 'Stacked', 'Split']
+
+// GTD-style project lanes. Ongoing is the active-focus lane and is hard-capped.
+const BASKET_STATUSES: { key: BasketStatus; label: string }[] = [
+  { key: 'ongoing', label: 'Ongoing' },
+  { key: 'next', label: 'Up next' },
+  { key: 'backlog', label: 'Backlog' },
+  { key: 'someday', label: 'Someday / maybe' },
+]
+const ONGOING_CAP = 2
+
+// Per-project identity colors (Reminders-style). Assigned round-robin at
+// creation; changeable from the project's ⋯ menu.
+const PROJECT_COLORS = ['#ff5a36', '#4f8cff', '#2ad17f', '#9a6bff', '#e8c54a', '#ff6b9d']
 
 const STORAGE_KEY = 'focus-router-v1'
+// Optional Google sign-in / backend sync. The app is local-first: with these
+// unset, sign-in simply doesn't appear and everything works on localStorage.
+const AUTH_KEY = 'focus_auth'
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+const SYNC_ON = !!GOOGLE_CLIENT_ID && !!API_BASE
 
 const DEFAULT_STATE: State = {
   tasks: [],
   // Fresh installs start with no baskets — create your own in the Projects
   // tab. (The design prototype shipped its author's personal baskets here.)
   baskets: [],
-  widgets: { word: true, tip: true, book: false, habit: true, btc: true, stats: true },
-  habit: { name: 'Read 20 min', days: {} },
+  widgets: { word: true, tip: true, btc: true, music: true },
   stats: {},
-  tweaks: { layout: 'Paired', accent: '#ff5a36' },
+  tweaks: { accent: '#ff5a36' },
+  today: { date: '', ids: [] },
 }
+
+const TODAY_CAP = 5
 
 /* =====================================================================
    HELPERS
    ===================================================================== */
 const uid = () => Math.random().toString(36).slice(2, 9)
 // Local-date key (YYYY-MM-DD). toISOString() would use UTC, which flips the
-// "day" at the wrong local hour — stats and habit streaks would roll over at
-// e.g. noon for UTC+12 users.
+// "day" at the wrong local hour — daily stats would roll over at e.g. noon
+// for UTC+12 users.
 const dateKey = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const todayKey = () => dateKey(new Date())
@@ -168,6 +187,51 @@ const E_SCORE: Record<Energy, number> = { Low: 0, Med: 1, High: 2 }
 const ZERO_DAY: DayStats = { pomos: 0, mins: 0, complete: 0, partial: 0, distracted: 0 }
 
 /* =====================================================================
+   AUTH / SYNC (optional — Google Identity Services + state-blob backend)
+   ===================================================================== */
+type AuthUser = { email: string; name?: string; picture?: string }
+type AuthState = { token: string; refreshToken: string; user: AuthUser }
+
+// Load the GIS client script once, on demand.
+let gisPromise: Promise<void> | null = null
+function loadGis(): Promise<void> {
+  if (gisPromise) return gisPromise
+  gisPromise = new Promise<void>((resolve, reject) => {
+    if ((window as { google?: unknown }).google) return resolve()
+    const s = document.createElement('script')
+    s.src = 'https://accounts.google.com/gsi/client'
+    s.async = true
+    s.defer = true
+    s.onload = () => resolve()
+    s.onerror = () => reject(new Error('Google sign-in failed to load'))
+    document.head.appendChild(s)
+  })
+  return gisPromise
+}
+
+// Non-lossy merge used on sign-in: union projects + tasks by id (server wins on
+// a conflict), union stats by day, keep today only if it's still today, and
+// keep local device prefs (widgets/accent).
+function mergeState(local: State, server: Partial<State>): State {
+  const unionById = <T extends { id: string }>(a: T[], b: T[]): T[] => {
+    const m = new Map<string, T>()
+    for (const x of a) m.set(x.id, x)
+    for (const x of b) m.set(x.id, x)
+    return [...m.values()]
+  }
+  const today = server.today && server.today.date === todayKey()
+    ? server.today
+    : local.today.date === todayKey() ? local.today : { date: todayKey(), ids: [] }
+  return {
+    ...local,
+    baskets: unionById(local.baskets, server.baskets ?? []),
+    tasks: unionById(local.tasks, server.tasks ?? []),
+    stats: { ...local.stats, ...(server.stats ?? {}) },
+    today,
+  }
+}
+
+/* =====================================================================
    BRAND MARK
    ===================================================================== */
 function Mark({ size = 30 }: { size?: number }) {
@@ -188,7 +252,7 @@ function Mark({ size = 30 }: { size?: number }) {
    PANEL / CARD
    ===================================================================== */
 function Card({
-  label, right, children, style, dim, glow, className,
+  label, right, children, style, dim, glow, className, compact,
 }: {
   label?: ReactNode
   right?: ReactNode
@@ -197,6 +261,8 @@ function Card({
   dim?: boolean
   glow?: boolean
   className?: string
+  /** Tighter padding + header spacing — for the slim widget strip. */
+  compact?: boolean
 }) {
   return (
     <section
@@ -209,7 +275,7 @@ function Card({
         boxShadow: glow
           ? 'var(--shadow-lift), 0 0 44px -10px var(--accent-glow)'
           : 'var(--shadow)',
-        padding: 18,
+        padding: compact ? '10px 14px' : 18,
         opacity: dim ? 0.22 : 1,
         filter: dim ? 'blur(2px) saturate(0.7)' : 'none',
         transform: dim ? 'scale(0.985)' : 'none',
@@ -221,7 +287,7 @@ function Card({
       }}
     >
       {label && (
-        <header style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 15 }}>
+        <header style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: compact ? 6 : 15 }}>
           <span style={{ width: 14, height: 3, borderRadius: 2, background: glow ? c.accent : c.accentLine, flexShrink: 0 }} />
           <span style={{ ...T.kicker, color: glow ? c.accent : c.dim }}>{label}</span>
           <span style={{ flex: 1 }} />
@@ -359,7 +425,7 @@ function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
    TIMER RING
    ===================================================================== */
 function TimerRing({
-  size = 200, stroke = 7, progress = 0, mode = 'work', children,
+  size = 160, stroke = 7, progress = 0, mode = 'work', children,
 }: {
   size?: number
   stroke?: number
@@ -486,7 +552,7 @@ function StatBlock({ label, value, accent }: { label: string; value: number; acc
 function CheckBox({ done, onClick }: { done: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick} className="fr-press" aria-pressed={done} style={{
-      width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+      width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
       border: `1.5px solid ${done ? c.accent : c.line}`,
       background: done ? c.accent : 'transparent', color: c.accentInk,
       display: 'grid', placeItems: 'center',
@@ -496,17 +562,177 @@ function CheckBox({ done, onClick }: { done: boolean; onClick: () => void }) {
   )
 }
 
-function MoveSelect({ onChange, children }: { onChange: (v: string) => void; children: ReactNode }) {
+type MenuEntry =
+  | { kind: 'item'; label: string; onClick: () => void; danger?: boolean; disabled?: boolean }
+  | { kind: 'label'; label: string }
+  | { kind: 'divider' }
+  | { kind: 'colors'; value: string; onPick: (hex: string) => void }
+
+/** ⋯ trigger + anchored dropdown menu. Closes on outside click and Escape. */
+function MenuButton({ entries, ariaLabel, size = 28 }: { entries: MenuEntry[]; ariaLabel: string; size?: number }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
   return (
-    <select
-      className="fr-sel"
-      onChange={(e) => onChange(e.target.value)}
-      value=""
+    <div ref={ref} style={{ position: 'relative', flexShrink: 0 }}>
+      <button
+        className="fr-press"
+        aria-label={ariaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(v => !v)}
+        style={{
+          width: size, height: size, borderRadius: 8, padding: 0,
+          border: 'none', background: open ? c.surface3 : 'transparent',
+          color: c.dim, cursor: 'pointer', fontSize: 14, lineHeight: 1,
+        }}
+      >⋯</button>
+      {open && (
+        <div role="menu" style={{
+          position: 'absolute', right: 0, top: size + 4, zIndex: 70, minWidth: 158,
+          background: c.surface2, border: `1px solid ${c.line}`, borderRadius: 10,
+          boxShadow: 'var(--shadow-lift)', padding: 4,
+        }}>
+          {entries.map((en, i) => {
+            if (en.kind === 'divider') return <div key={i} style={{ height: 1, background: c.hair, margin: '4px 6px' }} />
+            if (en.kind === 'label') return (
+              <div key={i} style={{ ...T.kicker, fontSize: 9, color: c.faint, padding: '6px 10px 3px' }}>{en.label}</div>
+            )
+            if (en.kind === 'colors') return (
+              <div key={i} style={{ display: 'flex', gap: 6, padding: '7px 10px' }}>
+                {PROJECT_COLORS.map(hex => (
+                  <button
+                    key={hex}
+                    aria-label={`Set color ${hex}`}
+                    onClick={() => { en.onPick(hex); setOpen(false) }}
+                    style={{
+                      width: 16, height: 16, borderRadius: '50%', padding: 0, cursor: 'pointer',
+                      background: hex, border: `2px solid ${en.value === hex ? '#fff' : 'transparent'}`,
+                    }}
+                  />
+                ))}
+              </div>
+            )
+            return (
+              <button
+                key={i}
+                role="menuitem"
+                className="fr-mi"
+                disabled={en.disabled}
+                onClick={() => { setOpen(false); en.onClick() }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', padding: '7px 10px',
+                  borderRadius: 7, border: 'none', background: 'transparent',
+                  cursor: en.disabled ? 'default' : 'pointer',
+                  fontFamily: 'var(--sans)', fontSize: 12.5, fontWeight: 500,
+                  color: en.danger ? c.down : c.text2, opacity: en.disabled ? 0.45 : 1,
+                }}
+              >{en.label}</button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Click-to-edit text field; Enter/blur commits, Escape cancels. */
+function InlineEdit({ value, onCommit, onCancel, style }: {
+  value: string
+  onCommit: (v: string) => void
+  onCancel: () => void
+  style?: CSSProperties
+}) {
+  const [draft, setDraft] = useState(value)
+  const doneRef = useRef(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => { inputRef.current?.focus(); inputRef.current?.select() }, [])
+  const commit = () => { if (!doneRef.current) { doneRef.current = true; onCommit(draft) } }
+  const cancel = () => { if (!doneRef.current) { doneRef.current = true; onCancel() } }
+  return (
+    <input
+      ref={inputRef}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') cancel() }}
+      onBlur={commit}
       style={{
-        ...mono, fontSize: 11, border: `1px solid ${c.hair}`, background: c.surface2, color: c.dim,
-        borderRadius: 7, padding: '6px 7px', cursor: 'pointer', appearance: 'none',
+        background: 'transparent', border: `1px solid ${c.accentLine}`, borderRadius: 8,
+        color: c.text, outline: 'none', padding: '4px 9px', fontFamily: 'var(--sans)', ...style,
       }}
-    >{children}</select>
+    />
+  )
+}
+
+/* =====================================================================
+   SIDE NAV
+   ===================================================================== */
+function SideNav({
+  view, onView, open, onClose, inboxCount, projectCount, footer,
+}: {
+  view: 'dashboard' | 'inbox' | 'projects'
+  onView: (v: 'dashboard' | 'inbox' | 'projects') => void
+  open: boolean
+  onClose: () => void
+  inboxCount: number
+  projectCount: number
+  /** Rendered pinned to the bottom of the sidebar (account / sync). */
+  footer?: ReactNode
+}) {
+  const itemStyle = (active: boolean): CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left',
+    padding: '10px 12px', borderRadius: 10, minHeight: 42,
+    border: `1px solid ${active ? c.accentLine : 'transparent'}`,
+    background: active ? c.accentSoft : 'transparent',
+    color: active ? c.text : c.dim,
+    fontFamily: 'var(--sans)', fontSize: 13.5, fontWeight: 600, letterSpacing: '0.005em',
+    transition: 'background .16s ease, color .16s ease, border-color .16s ease',
+  })
+  const countStyle: CSSProperties = {
+    ...mono, fontSize: 10.5, color: c.faint, fontVariantNumeric: 'tabular-nums', flexShrink: 0,
+  }
+  const navItem = (key: 'dashboard' | 'inbox' | 'projects', glyph: string, label: string, count?: number): ReactNode => {
+    const active = view === key
+    return (
+      <button
+        className="fr-nav"
+        aria-current={active ? 'page' : undefined}
+        onClick={() => { onView(key); onClose() }}
+        style={itemStyle(active)}
+      >
+        <span aria-hidden="true" style={{ width: 18, textAlign: 'center', fontSize: 14, color: active ? c.accent : c.faint }}>{glyph}</span>
+        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+        {count != null && count > 0 && <span style={{ ...countStyle, color: active ? c.accent : c.faint }}>{count}</span>}
+      </button>
+    )
+  }
+  return (
+    <aside
+      className={'fr-sidenav' + (open ? ' fr-sidenav-open' : '')}
+      role="navigation"
+      aria-label="Primary"
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '4px 8px', marginBottom: SP.xl }}>
+        <Mark size={26} />
+        <span style={{ fontSize: 15.5, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Focus Router</span>
+      </div>
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        {navItem('dashboard', '◎', 'Dashboard')}
+        {navItem('inbox', '▣', 'Inbox', inboxCount)}
+        {navItem('projects', '▦', 'Projects', projectCount)}
+      </nav>
+      {footer}
+    </aside>
   )
 }
 
@@ -516,8 +742,16 @@ function MoveSelect({ onChange, children }: { onChange: (v: string) => void; chi
 export default function App() {
   const [state, setState] = useState<State>(DEFAULT_STATE)
   const [loaded, setLoaded] = useState(false)
-  const [tab, setTab] = useState<'today' | 'projects'>('today')
+  const [view, setView] = useState<'dashboard' | 'inbox' | 'projects'>('dashboard')
   const [customize, setCustomize] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [statsOpen, setStatsOpen] = useState(false)
+
+  // auth / sync (optional)
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [syncErr, setSyncErr] = useState(false)
+  const gisRef = useRef<HTMLDivElement | null>(null)
+  const pulledRef = useRef(false)
 
   // quick add
   const [input, setInput] = useState('')
@@ -534,9 +768,32 @@ export default function App() {
   // btc
   const [btc, setBtc] = useState<{ p?: number; c?: number; err?: boolean } | null>(null)
 
+  // focus music — one root-mounted <audio> so playback survives tab switches
+  const [station, setStation] = useState(0)
+  const [musicOn, setMusicOn] = useState(false)
+  const [musicErr, setMusicErr] = useState(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
   // baskets / projects tab
-  const [newBasket, setNewBasket] = useState('')
   const [basketInputs, setBasketInputs] = useState<Record<string, string>>({})
+  // The project whose right-side drawer is open (null = none).
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [detailEditing, setDetailEditing] = useState(false)
+  // Hide completed tasks in the Inbox + project drawer lists (on by default).
+  const [hideCompleted, setHideCompleted] = useState(true)
+  // Drag-and-drop of project cards between lanes (HTML5 DnD, no library).
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [overLane, setOverLane] = useState<BasketStatus | null>(null)
+  // Deleted-project snapshot for the undo toast (replaces confirm dialogs)
+  const [undoState, setUndoState] = useState<{ msg: string; baskets: Basket[]; tasks: Task[] } | null>(null)
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // today card
+  const [todayDraft, setTodayDraft] = useState('')
+  const [todayPickOpen, setTodayPickOpen] = useState(false)
+
+  // learning tip — random pick, stable for the session
+  const [tipIdx] = useState(() => Math.floor(Math.random() * TIPS.length))
 
   /* ----- persistence ----- */
   useEffect(() => {
@@ -549,15 +806,35 @@ export default function App() {
         // them that hold no tasks; ones the user actually used are kept.
         const DEMO: Record<string, string> = { b1: 'SaaS / GA4', b2: 'NZ move', b3: 'Learning' }
         const tasks = parsed.tasks ?? []
-        const baskets = (parsed.baskets ?? []).filter(b =>
-          DEMO[b.id] !== b.name || tasks.some(t => t.basketId === b.id))
+        // Pre-status builds stored baskets as plain {id,name} — default those
+        // to backlog. Ongoing beyond the cap (old/imported data) demotes to
+        // up-next, first-come first-kept.
+        let ongoingSeen = 0
+        const baskets = (parsed.baskets ?? [])
+          .filter(b => DEMO[b.id] !== b.name || tasks.some(t => t.basketId === b.id))
+          .map((b, i) => {
+            let status: BasketStatus = BASKET_STATUSES.some(s => s.key === b.status) ? b.status : 'backlog'
+            if (status === 'ongoing' && ++ongoingSeen > ONGOING_CAP) status = 'next'
+            const color = typeof b.color === 'string' && b.color ? b.color : PROJECT_COLORS[i % PROJECT_COLORS.length]
+            return { ...b, status, color }
+          })
+        // Today's picks reset each day; drop ids whose task no longer exists.
+        const today = parsed.today && parsed.today.date === todayKey()
+          ? {
+              date: parsed.today.date,
+              ids: (parsed.today.ids ?? []).filter(id => tasks.some(t => t.id === id)).slice(0, TODAY_CAP),
+            }
+          : { date: todayKey(), ids: [] }
+        // Retired tweaks ('Split'/'Paired'/'Stacked' layouts) and the habit
+        // tracker may linger in stored JSON — only known fields are picked up.
+        const tweaks = { accent: parsed.tweaks?.accent ?? DEFAULT_STATE.tweaks.accent }
         setState(s => ({
           ...DEFAULT_STATE,
-          ...parsed,
+          tasks,
           baskets,
+          today,
           widgets: { ...DEFAULT_STATE.widgets, ...(parsed.widgets ?? {}) },
-          habit: { ...DEFAULT_STATE.habit, ...(parsed.habit ?? {}) },
-          tweaks: { ...DEFAULT_STATE.tweaks, ...(parsed.tweaks ?? {}) },
+          tweaks,
           stats: parsed.stats ?? s.stats,
         }))
       }
@@ -582,16 +859,171 @@ export default function App() {
       .catch(() => setBtc({ err: true }))
   }, [])
 
+  /* ----- music: reload the stream on station switch ----- */
+  useEffect(() => {
+    const a = audioRef.current
+    if (!a) return
+    a.load()
+    if (musicOn) a.play().catch(() => { setMusicErr(true); setMusicOn(false) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [station])
+
+  /* ----- music: hiding the widget stops playback (no orphan audio) ----- */
+  useEffect(() => {
+    if (!state.widgets.music && musicOn) {
+      audioRef.current?.pause()
+      setMusicOn(false)
+    }
+  }, [state.widgets.music, musicOn])
+
+  /* ----- leaving a project closes its rename editor ----- */
+  useEffect(() => { setDetailEditing(false) }, [selectedId])
+
+  /* ----- stats / customize popups: close on Escape ----- */
+  useEffect(() => {
+    if (!statsOpen && !customize) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setStatsOpen(false); setCustomize(false) } }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [statsOpen, customize])
+
   /* ----- apply accent to CSS vars ----- */
   useEffect(() => {
     const a = state.tweaks.accent || '#ff5a36'
     const r = document.documentElement.style
     r.setProperty('--accent', a)
     r.setProperty('--accent-2', a)
-    r.setProperty('--accent-soft', a + '22')
-    r.setProperty('--accent-line', a + '59')
-    r.setProperty('--accent-glow', a + '73')
+    r.setProperty('--accent-soft', a + '1f')
+    r.setProperty('--accent-line', a + '66')
+    r.setProperty('--accent-glow', a + '3a')
   }, [state.tweaks.accent])
+
+  /* ----- auth actions (optional sync) ----- */
+  // Latest auth, mirrored into a ref so async refresh/retry flows never read a
+  // stale token captured in an effect closure.
+  const authRef = useRef<AuthState | null>(null)
+  const applyAuth = (a: AuthState | null) => {
+    authRef.current = a
+    setAuth(a)
+    try {
+      if (a) localStorage.setItem(AUTH_KEY, JSON.stringify(a))
+      else localStorage.removeItem(AUTH_KEY)
+    } catch { /* ignore */ }
+  }
+
+  const handleCredential = (idToken: string) => {
+    if (!API_BASE) return
+    fetch(`${API_BASE}/api/auth/google`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id_token: idToken }),
+    })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error('auth failed'))))
+      .then((d: { token?: string; jwt?: string; refresh_token?: string; user: AuthUser }) => {
+        const token = d.token ?? d.jwt
+        if (!token || !d.refresh_token) throw new Error('no token')
+        applyAuth({ token, refreshToken: d.refresh_token, user: d.user })
+        setSyncErr(false)
+      })
+      .catch(() => setSyncErr(true))
+  }
+
+  // Exchange the refresh token for a fresh access token (and rotated refresh
+  // token). Returns the new access token, or null if refresh failed.
+  const refreshAccessToken = async (): Promise<string | null> => {
+    const cur = authRef.current
+    if (!cur?.refreshToken) return null
+    try {
+      const r = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: cur.refreshToken }),
+      })
+      if (!r.ok) return null
+      const d = await r.json() as { token?: string; refresh_token?: string }
+      if (!d.token || !d.refresh_token) return null
+      applyAuth({ ...cur, token: d.token, refreshToken: d.refresh_token })
+      return d.token
+    } catch { return null }
+  }
+
+  // fetch against the API with the bearer access token. On 401, refresh once and
+  // retry; if the refresh also fails, sign out. Returns null when not signed in.
+  const authedFetch = async (path: string, init: RequestInit = {}): Promise<Response | null> => {
+    const cur = authRef.current
+    if (!cur) return null
+    const withAuth = (token: string): RequestInit => ({
+      ...init,
+      headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` },
+    })
+    let res = await fetch(`${API_BASE}${path}`, withAuth(cur.token))
+    if (res.status === 401) {
+      const newToken = await refreshAccessToken()
+      if (!newToken) { applyAuth(null); pulledRef.current = false; return res }
+      res = await fetch(`${API_BASE}${path}`, withAuth(newToken))
+    }
+    return res
+  }
+
+  const signOut = () => {
+    // Best-effort revoke of the refresh token server-side before dropping it.
+    const rt = authRef.current?.refreshToken
+    if (rt && API_BASE) {
+      fetch(`${API_BASE}/api/auth/signout`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt }),
+      }).catch(() => { /* ignore */ })
+    }
+    applyAuth(null)
+    pulledRef.current = false
+    setSyncErr(false)
+  }
+
+  /* ----- auth: restore session on boot ----- */
+  useEffect(() => {
+    try { const raw = localStorage.getItem(AUTH_KEY); if (raw) { const a = JSON.parse(raw) as AuthState; if (a?.token && a?.refreshToken) applyAuth(a) } } catch { /* ignore */ }
+  }, [])
+
+  /* ----- auth: pull + merge server state once after sign-in ----- */
+  useEffect(() => {
+    if (!loaded || !auth || !SYNC_ON || pulledRef.current) return
+    pulledRef.current = true
+    authedFetch('/api/state')
+      .then(r => (r && r.ok ? r.json() : null))
+      .then((d: { state?: Partial<State> } | null) => { if (d && d.state) setState(s => mergeState(s, d.state!)) })
+      .catch(() => { /* offline / unconfigured — stays local-first */ })
+  }, [loaded, auth])
+
+  /* ----- auth: push state to server (debounced, best-effort) ----- */
+  useEffect(() => {
+    if (!loaded || !auth || !SYNC_ON) return
+    const t = setTimeout(() => {
+      authedFetch('/api/state', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state }),
+      })
+        .then(r => { if (r) setSyncErr(!r.ok) })
+        .catch(() => setSyncErr(true))
+    }, 900)
+    return () => clearTimeout(t)
+  }, [state, auth, loaded])
+
+  /* ----- auth: render the Google button into the sidebar footer ----- */
+  useEffect(() => {
+    if (!loaded || auth || !SYNC_ON) return
+    let cancelled = false
+    loadGis().then(() => {
+      if (cancelled || !gisRef.current) return
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const g = (window as any).google
+      if (!g?.accounts?.id) return
+      g.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: (resp: { credential: string }) => handleCredential(resp.credential) })
+      gisRef.current.innerHTML = ''
+      // Fit the button to the sidebar column (GIS clamps width to [200, 400]).
+      const w = Math.max(200, Math.min(400, Math.round(gisRef.current.clientWidth || 220)))
+      g.accounts.id.renderButton(gisRef.current, { theme: 'filled_black', size: 'large', text: 'signin_with', shape: 'pill', width: w })
+    }).catch(() => { /* blocked / offline */ })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, auth])
 
   /* ----- timer engine ----- */
   // `left` is recomputed from the wall-clock deadline on every tick (and on
@@ -619,6 +1051,9 @@ export default function App() {
   /* ----- derived ----- */
   const openTasks = state.tasks.filter(t => !t.done)
   const inbox = state.tasks.filter(t => !t.basketId)
+  const todayTasks = state.today.ids
+    .map(id => state.tasks.find(t => t.id === id))
+    .filter((t): t is Task => !!t)
 
   const suggestion = useMemo(() => {
     const pool = openTasks.filter(t => !skipped.includes(t.id) && t.id !== timer.taskId)
@@ -629,6 +1064,8 @@ export default function App() {
       s += (2 - gap) * 100
       if (!t.basketId) s += 30
       s += Math.min(daysOld(t.createdAt), 10) * 3
+      // Committed-for-today picks outrank everything but a hard energy clash.
+      if (state.today.ids.includes(t.id)) s += 150
       return { t, s }
     }).sort((a, b) => b.s - a.s)
     const best = scored[0].t
@@ -636,11 +1073,12 @@ export default function App() {
     const why = [
       `${best.mins}m`,
       best.energy + ' energy',
+      ...(state.today.ids.includes(best.id) ? ['today pick'] : []),
       basket ? `from "${basket.name}"` : 'inbox',
       daysOld(best.createdAt) > 0 ? `${daysOld(best.createdAt)}d old` : 'added today',
     ]
     return { task: best, why }
-  }, [state.tasks, skipped, energy, timer.taskId, state.baskets, openTasks])
+  }, [state.tasks, skipped, energy, timer.taskId, state.baskets, openTasks, state.today.ids])
 
   const tStats = state.stats[todayKey()] ?? ZERO_DAY
 
@@ -676,8 +1114,80 @@ export default function App() {
   const removeTask = (id: string) =>
     setState(s => ({ ...s, tasks: s.tasks.filter(t => t.id !== id) }))
 
+  const addToToday = (id: string) =>
+    setState(s => (s.today.ids.length >= TODAY_CAP || s.today.ids.includes(id))
+      ? s
+      : { ...s, today: { date: todayKey(), ids: [...s.today.ids, id] } })
+
+  const removeFromToday = (id: string) =>
+    setState(s => ({ ...s, today: { ...s.today, ids: s.today.ids.filter(x => x !== id) } }))
+
+  // On-demand today task: lands in the Inbox (the default project) AND on
+  // the today list.
+  const addTodayTask = () => {
+    const title = todayDraft.trim()
+    if (!title) return
+    const t: Task = { id: uid(), title, mins: addMins, energy: addEnergy, basketId: null, done: false, createdAt: Date.now() }
+    setState(s => s.today.ids.length >= TODAY_CAP ? s : ({
+      ...s,
+      tasks: [...s.tasks, t],
+      today: { date: todayKey(), ids: [...s.today.ids, t.id] },
+    }))
+    setTodayDraft('')
+  }
+
   const moveTask = (id: string, basketId: string | null) =>
     setState(s => ({ ...s, tasks: s.tasks.map(t => (t.id === id ? { ...t, basketId } : t)) }))
+
+  const createBasket = (name: string, status: BasketStatus = 'backlog') => {
+    const v = name.trim()
+    if (!v) return
+    const id = uid()
+    setState(s => {
+      // Respect the Ongoing cap on creation — overflow lands in Up next.
+      const lane: BasketStatus = status === 'ongoing' && s.baskets.filter(b => b.status === 'ongoing').length >= ONGOING_CAP ? 'next' : status
+      return { ...s, baskets: [...s.baskets, { id, name: v, status: lane, color: PROJECT_COLORS[s.baskets.length % PROJECT_COLORS.length] }] }
+    })
+    setView('projects')
+    setSelectedId(id)
+  }
+
+  const renameBasket = (id: string, name: string) => {
+    const v = name.trim()
+    if (v) setState(s => ({ ...s, baskets: s.baskets.map(x => (x.id === id ? { ...x, name: v } : x)) }))
+  }
+
+  const setBasketColor = (id: string, color: string) =>
+    setState(s => ({ ...s, baskets: s.baskets.map(x => (x.id === id ? { ...x, color } : x)) }))
+
+  // No confirm dialog — delete immediately, offer Undo for a few seconds.
+  const deleteBasket = (b: Basket) => {
+    const ts = state.tasks.filter(t => t.basketId === b.id)
+    setState(s => ({
+      ...s,
+      baskets: s.baskets.filter(x => x.id !== b.id),
+      tasks: s.tasks.filter(t => t.basketId !== b.id),
+    }))
+    if (addDest === b.id) setAddDest('inbox')
+    if (selectedId === b.id) setSelectedId(null)
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+    setUndoState({ msg: `Deleted "${b.name}"`, baskets: [b], tasks: ts })
+    undoTimer.current = setTimeout(() => setUndoState(null), 6000)
+  }
+
+  const undoDelete = () => {
+    if (!undoState) return
+    setState(s => ({ ...s, baskets: [...s.baskets, ...undoState.baskets], tasks: [...s.tasks, ...undoState.tasks] }))
+    setUndoState(null)
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+  }
+
+  const setBasketStatus = (id: string, status: BasketStatus) =>
+    setState(s => {
+      const ongoing = s.baskets.filter(b => b.status === 'ongoing' && b.id !== id).length
+      if (status === 'ongoing' && ongoing >= ONGOING_CAP) return s
+      return { ...s, baskets: s.baskets.map(b => (b.id === id ? { ...b, status } : b)) }
+    })
 
   const startTask = (task: Task) =>
     setTimer({
@@ -707,6 +1217,21 @@ export default function App() {
     setTimer({ phase: 'break', taskId: null, left: 5 * 60, total: 5 * 60, running: true, endsAt: Date.now() + 5 * 60 * 1000 })
   }
 
+  const toggleMusic = () => {
+    const a = audioRef.current
+    if (!a) return
+    setMusicErr(false)
+    if (musicOn) {
+      a.pause()
+      setMusicOn(false)
+    } else {
+      a.play().catch(() => { setMusicErr(true); setMusicOn(false) })
+      setMusicOn(true)
+    }
+  }
+
+  const switchStation = (i: number) => { setMusicErr(false); setStation(i) }
+
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })
     const a = document.createElement('a')
@@ -714,12 +1239,6 @@ export default function App() {
     a.download = `focus-router-${todayKey()}.json`
     a.click()
   }
-
-  const habitDoneToday = !!state.habit.days[todayKey()]
-  const toggleHabit = () => setState(s => ({
-    ...s,
-    habit: { ...s.habit, days: { ...s.habit.days, [todayKey()]: !habitDoneToday } },
-  }))
 
   const last7 = [...Array(7)].map((_, i) => {
     const d = new Date()
@@ -729,7 +1248,6 @@ export default function App() {
       k,
       label: d.toLocaleDateString('en', { weekday: 'narrow' }),
       v: state.stats[k]?.mins ?? 0,
-      habit: !!state.habit.days[k],
     }
   })
   const maxMins = Math.max(...last7.map(d => d.v), 1)
@@ -760,10 +1278,23 @@ export default function App() {
     fontSize: 14, padding: '13px 0', outline: 'none', fontFamily: 'var(--sans)',
   }
 
-  /* ----- inbox row ----- */
-  const inboxRow = (t: Task) => {
+  /* ----- task row (projects tab) — works for inbox and project lists ----- */
+  const taskRow = (t: Task, dotColor?: string) => {
     const age = daysOld(t.createdAt)
     const aged = age >= 3 && !t.done
+    const taskMenu: MenuEntry[] = [
+      {
+        kind: 'item', label: 'Add to today', onClick: () => addToToday(t.id),
+        disabled: t.done || state.today.ids.includes(t.id) || state.today.ids.length >= TODAY_CAP,
+      },
+      { kind: 'label', label: 'Move to' },
+      ...(t.basketId !== null ? [{ kind: 'item', label: 'Inbox', onClick: () => moveTask(t.id, null) } as MenuEntry] : []),
+      ...state.baskets.filter(x => x.id !== t.basketId).map<MenuEntry>(x => ({
+        kind: 'item', label: x.name, onClick: () => moveTask(t.id, x.id),
+      })),
+      { kind: 'divider' },
+      { kind: 'item', label: 'Delete task', onClick: () => removeTask(t.id), danger: true },
+    ]
     return (
       <div key={t.id} className="fr-row" style={{
         border: `1px solid ${aged ? c.accentLine : c.hair}`, borderRadius: 10,
@@ -772,114 +1303,115 @@ export default function App() {
         opacity: t.done ? 0.42 : 1,
       }}>
         <CheckBox done={t.done} onClick={() => toggleDone(t.id)} />
+        {dotColor && <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />}
         <span style={{ ...T.taskTitle, textDecoration: t.done ? 'line-through' : 'none', flex: 1, color: c.text }}>{t.title}</span>
         {aged && <span style={{ ...mono, fontSize: 10, color: c.accent, letterSpacing: '0.01em' }}>{age}d · review</span>}
         <Tag>{t.mins}m</Tag>
         <Tag>{t.energy}</Tag>
-        <MoveSelect onChange={(v) => { if (!v) return; if (v === 'del') removeTask(t.id); else moveTask(t.id, v) }}>
-          <option value="">⋯</option>
-          {state.baskets.map(b => <option key={b.id} value={b.id}>→ {b.name}</option>)}
-          <option value="del">delete</option>
-        </MoveSelect>
+        <MenuButton ariaLabel={`Options for task "${t.title}"`} entries={taskMenu} />
       </div>
     )
   }
 
-  /* ----- habit metrics ----- */
-  const habitWeek = last7.filter(d => d.habit).length
-  // An unmarked today doesn't break the streak — the day isn't over yet.
-  let habitStreak = 0
-  for (let i = habitDoneToday ? 0 : 1; ; i++) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    if (state.habit.days[dateKey(d)]) habitStreak++
-    else break
-  }
-
-  /* ----- sidebar widgets ----- */
+  /* ----- widgets ----- */
   const wWord = state.widgets.word && (
-    <Card label="Word of the day" dim={inFocus} style={{ minWidth: 0 }}>
-      <div style={{ ...T.word, fontSize: 21, color: c.text }}>{WORDS[di % WORDS.length][0]}</div>
-      <div style={{ ...T.body, fontSize: 12.5, color: c.dim, marginTop: 6 }}>{WORDS[di % WORDS.length][1]}</div>
+    <Card label="Word of the day" dim={inFocus} compact style={{ minWidth: 0 }}>
+      <div style={{ ...T.word, fontSize: 17, color: c.text }}>{WORDS[di % WORDS.length][0]}</div>
+      <div style={{ ...T.body, fontSize: 11.5, lineHeight: 1.45, color: c.dim, marginTop: 3 }}>{WORDS[di % WORDS.length][1]}</div>
     </Card>
   )
 
   const wTip = state.widgets.tip && (
-    <Card label="Random tip" dim={inFocus} style={{ minWidth: 0 }}>
-      <div style={{ ...T.body, fontSize: 13, color: c.text2 }}>{TIPS[di % TIPS.length]}</div>
-    </Card>
-  )
-
-  const wBook = state.widgets.book && (
-    <Card label="Book to read" dim={inFocus} style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 15.5, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
-        {BOOKS[di % BOOKS.length][0]}
+    <Card label="Learning tip" dim={inFocus} compact style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
+        {TIPS[tipIdx][0]}
       </div>
-      <div style={{ ...mono, fontSize: 10.5, color: c.faint, marginTop: 7 }}>
-        {BOOKS[di % BOOKS.length][1]}
+      <div style={{ ...T.body, fontSize: 11.5, lineHeight: 1.4, color: c.dim, marginTop: 3 }}>
+        {TIPS[tipIdx][1]}
       </div>
     </Card>
   )
 
-  const wHabit = state.widgets.habit && (
-    <Card label="Daily habit" dim={inFocus} style={{ minWidth: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-        <CheckBox done={habitDoneToday} onClick={toggleHabit} />
-        <input
-          value={state.habit.name}
-          onChange={(e) => setState(s => ({ ...s, habit: { ...s.habit, name: e.target.value } }))}
+  // BTC now lives as a small ticker next to the date in the header (see below).
+
+  // Stays interactive during focus (no dim) — adjusting music mid-session is
+  // exactly when you need it.
+  const wMusic = state.widgets.music && (
+    <Card label="Focus music" right={musicOn ? 'on air' : undefined} compact style={{ minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          className="fr-press"
+          onClick={toggleMusic}
+          aria-label={musicOn ? 'Pause music' : 'Play music'}
           style={{
-            ...T.bodyStrong, border: 'none', outline: 'none', background: 'transparent',
-            flex: 1, color: c.text, fontFamily: 'var(--sans)', minWidth: 0,
+            width: 32, height: 32, borderRadius: 999, flexShrink: 0, padding: 0,
+            display: 'grid', placeItems: 'center', cursor: 'pointer',
+            background: musicOn ? c.accent : c.surface2,
+            color: musicOn ? c.accentInk : c.text2,
+            border: `1px solid ${musicOn ? c.accentLine : c.hair}`,
+            boxShadow: musicOn ? '0 0 18px -5px var(--accent-glow)' : 'none',
           }}
-        />
-      </div>
-      <div style={{ display: 'flex', gap: 5, marginTop: 13 }}>
-        {last7.map((d, i) => {
-          const today = i === last7.length - 1
-          return (
-            <div key={d.k} style={{
-              flex: 1, height: 15, borderRadius: 4,
-              background: d.habit ? c.accent : c.surface2,
-              border: `1px solid ${d.habit ? c.accentLine : (today ? c.line : c.hair)}`,
-            }} />
-          )
-        })}
-      </div>
-      <div style={{ ...mono, fontSize: 10, color: c.faint, marginTop: 9 }}>
-        {habitStreak > 0 ? `${habitStreak}-day streak` : 'start a streak'} · {habitWeek}/7 this week
-      </div>
-    </Card>
-  )
-
-  const wBtc = state.widgets.btc && (
-    <Card label="BTC" dim={inFocus} style={{ minWidth: 0 }}>
-      {btc === null && <div style={{ ...mono, fontSize: 11, color: c.faint }}>loading…</div>}
-      {btc && btc.err && (
-        <div style={{ ...mono, fontSize: 10, color: c.faint, lineHeight: 1.5 }}>
-          price unavailable — works in production
-        </div>
-      )}
-      {btc && btc.p !== undefined && (
-        <Fragment>
-          <div style={{ ...mono, fontSize: 23, fontWeight: 700, color: c.text, fontVariantNumeric: 'tabular-nums' }}>
-            ${btc.p.toLocaleString()}
-          </div>
+        >
+          {musicOn ? (
+            <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden="true">
+              <rect x="2" y="1.5" width="3" height="9" rx="1" fill="currentColor" />
+              <rect x="7" y="1.5" width="3" height="9" rx="1" fill="currentColor" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3.2 1.6 L10.4 6 L3.2 10.4 Z" fill="currentColor" />
+            </svg>
+          )}
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{
-            display: 'inline-flex', alignItems: 'center', gap: 5,
-            ...mono, fontSize: 11,
-            color: (btc.c ?? 0) >= 0 ? c.up : c.down,
-            marginTop: 8, background: c.surface2, borderRadius: 7, padding: '3px 8px',
+            fontSize: 13.5, fontWeight: 700, letterSpacing: '-0.01em', color: c.text,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{STATIONS[station].name}</div>
+          <div style={{
+            ...mono, fontSize: 9.5, color: musicErr ? c.down : c.faint, marginTop: 2,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}>
-            {(btc.c ?? 0) >= 0 ? '▲' : '▼'} {Math.abs(btc.c ?? 0).toFixed(2)}% · 24h
+            {musicErr ? 'stream unavailable — try again' : (musicOn ? 'now playing' : STATIONS[station].genre) + ' · somafm'}
           </div>
-        </Fragment>
-      )}
+        </div>
+        {musicOn && !musicErr && (
+          <span aria-hidden="true" style={{ display: 'inline-flex', gap: 2.5, alignItems: 'flex-end', height: 13, flexShrink: 0 }}>
+            {[0, 1, 2].map(i => (
+              <span key={i} style={{
+                width: 3, height: 13, borderRadius: 2, background: c.accent, transformOrigin: 'bottom',
+                animation: `frEq ${0.9 + i * 0.25}s ease-in-out ${i * 0.15}s infinite`,
+              }} />
+            ))}
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 6 }}>
+        {STATIONS.map((s, i) => (
+          <Chip key={s.name} active={i === station} onClick={() => switchStation(i)}>{s.tag}</Chip>
+        ))}
+      </div>
     </Card>
   )
 
-  const wStats = state.widgets.stats && (
-    <Card label="Deep work stats" dim={inFocus}>
+  const statsModal = statsOpen && (
+    <div className="fr-modal-backdrop" onClick={() => setStatsOpen(false)}>
+      <div className="fr-modal" role="dialog" aria-modal="true" aria-label="Deep work stats" onClick={(e) => e.stopPropagation()}>
+        <Card
+          label="Deep work stats"
+          right={
+            <button
+              onClick={() => setStatsOpen(false)}
+              aria-label="Close stats"
+              style={{
+                width: 26, height: 26, borderRadius: 7, padding: 0,
+                background: 'transparent', border: 'none',
+                color: c.dim, cursor: 'pointer', fontSize: 13,
+              }}
+            >✕</button>
+          }
+          style={{ width: 'min(620px, calc(100vw - 36px))', boxShadow: 'var(--shadow-lift)' }}
+        >
       <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap', rowGap: 16 }}>
         <StatBlock label="Pomodoros"   value={tStats.pomos} />
         <StatBlock label="Focus min"   value={tStats.mins} accent />
@@ -893,51 +1425,271 @@ export default function App() {
         </div>
         <StatsChart days={last7} max={maxMins} />
       </div>
+        </Card>
+      </div>
+    </div>
+  )
+
+  const customizeModal = customize && (
+    <div className="fr-modal-backdrop" onClick={() => setCustomize(false)}>
+      <div className="fr-modal" role="dialog" aria-modal="true" aria-label="Customize" onClick={(e) => e.stopPropagation()}>
+        <Card
+          label="Customize"
+          right={
+            <button
+              onClick={() => setCustomize(false)}
+              aria-label="Close customize"
+              style={{
+                width: 26, height: 26, borderRadius: 7, padding: 0,
+                background: 'transparent', border: 'none',
+                color: c.dim, cursor: 'pointer', fontSize: 13,
+              }}
+            >✕</button>
+          }
+          style={{ width: 'min(560px, calc(100vw - 36px))', boxShadow: 'var(--shadow-lift)' }}
+        >
+          {/* widgets */}
+          <div style={{ ...T.kicker, fontSize: 10, color: c.faint, marginBottom: 10 }}>Widgets</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(196px, 1fr))', gap: 10 }}>
+            {([
+              ['word', 'Word of the day'],
+              ['tip', 'Learning tip'],
+              ['music', 'Focus music'],
+            ] as [WidgetId, string][]).map(([id, name]) => (
+              <label key={id} style={{
+                display: 'flex', alignItems: 'center', gap: 11,
+                border: `1px solid ${c.hair}`, borderRadius: 10, padding: '10px 12px',
+                cursor: 'pointer', background: c.surface2,
+              }}>
+                <Toggle on={state.widgets[id]} onClick={() => toggleWidget(id)} />
+                <span style={{ fontSize: 13, fontWeight: 500, color: c.text2 }}>{name}</span>
+              </label>
+            ))}
+          </div>
+
+          {/* accent */}
+          <div style={{ ...T.kicker, fontSize: 10, color: c.faint, margin: '18px 0 10px' }}>Accent</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {ACCENT_OPTIONS.map(hex => {
+              const on = state.tweaks.accent.toLowerCase() === hex.toLowerCase()
+              return (
+                <button
+                  key={hex}
+                  onClick={() => setTweak('accent', hex)}
+                  aria-pressed={on}
+                  title={hex}
+                  style={{
+                    width: 30, height: 30, borderRadius: 999, padding: 0, cursor: 'pointer',
+                    background: hex,
+                    border: `2px solid ${on ? '#fff' : c.hair}`,
+                    boxShadow: on ? `0 0 14px -2px ${hex}99` : 'none',
+                  }}
+                />
+              )
+            })}
+          </div>
+
+          <div style={{ marginTop: 18, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Btn size="sm" onClick={exportJSON}>⤓ Export data (JSON)</Btn>
+            <span style={{ ...mono, fontSize: 10.5, color: c.faint }}>back up your tasks & stats</span>
+          </div>
+        </Card>
+      </div>
+    </div>
+  )
+
+  /* ----- quick add card (top row) ----- */
+  const qaCard = (
+    <Card label="Quick add" dim={inFocus} style={{ minWidth: 0 }}>
+      <label className="fr-field" style={{ ...fieldStyle, minWidth: 0 }}>
+        <span style={{ color: c.accent, fontSize: 17, fontWeight: 700, lineHeight: 1 }}>+</span>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && addTask()}
+          placeholder="Add a task, hit Enter…"
+          style={{ ...inputStyle, fontSize: 13, padding: '11px 0' }}
+        />
+      </label>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 11 }}>
+        <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint, marginRight: 2 }}>Time</span>
+        {[10, 25, 60].map(m =>
+          <Chip key={m} active={addMins === m} onClick={() => setAddMins(m)}>{m}m</Chip>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint, marginRight: 2 }}>Energy</span>
+        {ENERGIES.map(e =>
+          <Chip key={e} active={addEnergy === e} onClick={() => setAddEnergy(e)}>{e}</Chip>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 11 }}>
+        <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Save to</span>
+        <select
+          className="fr-sel"
+          value={addDest}
+          onChange={(e) => setAddDest(e.target.value)}
+          style={{
+            ...mono, fontSize: 11, border: `1px solid ${c.hair}`, background: c.surface2,
+            color: c.text2, borderRadius: 7, padding: '7px 8px', cursor: 'pointer',
+            flex: 1, minWidth: 0,
+          }}
+        >
+          <option value="inbox">Inbox</option>
+          {state.baskets.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </div>
     </Card>
   )
 
-  /* ----- quick add card ----- */
-  const qaCard = (
-    <Card label="Quick add" dim={inFocus} style={{ gridArea: 'quick' }}>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', maxWidth: 620 }}>
-        <label className="fr-field" style={fieldStyle}>
-          <span style={{ color: c.accent, fontSize: 19, fontWeight: 700, lineHeight: 1 }}>+</span>
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addTask()}
-            placeholder='Add a task, hit Enter…  ("#saas" routes to a basket)'
-            style={inputStyle}
-          />
-        </label>
-        <Btn variant="primary" onClick={addTask}>Add ↵</Btn>
+  /* ----- today card — up to five committed tasks ----- */
+  const todayCard = (
+    <Card
+      label="Today"
+      right={`${todayTasks.filter(t => !t.done).length} open · ${todayTasks.length}/${TODAY_CAP}`}
+      dim={inFocus}
+      style={{ minWidth: 0 }}
+    >
+      {todayTasks.length === 0 && (
+        <div style={{ ...mono, fontSize: 11, color: c.faint, marginBottom: 10 }}>
+          Pick up to {TODAY_CAP} tasks that would make today a win.
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {todayTasks.map(t => (
+          <div key={t.id} className="fr-row" style={{
+            border: `1px solid ${c.hair}`, borderRadius: 10, background: c.surface2,
+            padding: '9px 11px', display: 'flex', alignItems: 'center', gap: 9,
+            opacity: t.done ? 0.42 : 1,
+          }}>
+            <CheckBox done={t.done} onClick={() => toggleDone(t.id)} />
+            <span style={{
+              ...T.taskTitle, fontSize: 14, textDecoration: t.done ? 'line-through' : 'none',
+              flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              color: c.text,
+            }}>{t.title}</span>
+            <Tag>{t.mins}m</Tag>
+            <button
+              onClick={() => removeFromToday(t.id)}
+              aria-label={`Remove "${t.title}" from today`}
+              title="Remove from today (task is kept)"
+              style={{
+                width: 24, height: 24, borderRadius: 7, flexShrink: 0,
+                background: 'transparent', border: 'none',
+                color: c.faint, cursor: 'pointer', fontSize: 12,
+              }}
+            >✕</button>
+          </div>
+        ))}
       </div>
-      <div style={{ display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap', marginTop: 14 }}>
-        <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
-          <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint, marginRight: 2 }}>Time</span>
-          {[10, 25, 60].map(m =>
-            <Chip key={m} active={addMins === m} onClick={() => setAddMins(m)}>{m}m</Chip>
-          )}
+
+      {todayTasks.length < TODAY_CAP && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: todayTasks.length ? 10 : 0 }}>
+          <label className="fr-field" style={{
+            display: 'flex', alignItems: 'center', gap: 8, minWidth: 0,
+            border: `1px dashed ${c.line}`, borderRadius: 'var(--r-ctrl)',
+            background: 'transparent', padding: '0 11px',
+          }}>
+            <span style={{ color: c.accent, fontSize: 15, fontWeight: 700, lineHeight: 1 }}>+</span>
+            <input
+              value={todayDraft}
+              onChange={(e) => setTodayDraft(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addTodayTask()}
+              placeholder="Add for today… (saves to Inbox)"
+              style={{
+                flex: 1, minWidth: 0, border: 'none', background: 'transparent', color: c.text,
+                fontSize: 13, padding: '9px 0', outline: 'none', fontFamily: 'var(--sans)',
+              }}
+            />
+          </label>
+          <Btn size="sm" variant={todayPickOpen ? 'soft' : 'neutral'} onClick={() => setTodayPickOpen(v => !v)}>
+            ⌁ Pick from projects
+          </Btn>
         </div>
-        <div style={{ display: 'flex', gap: 7, alignItems: 'center' }}>
-          <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint, marginRight: 2 }}>Energy</span>
-          {ENERGIES.map(e =>
-            <Chip key={e} active={addEnergy === e} onClick={() => setAddEnergy(e)}>{e}</Chip>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint, marginRight: 2 }}>Save to</span>
-          <Chip active={addDest === 'inbox'} onClick={() => setAddDest('inbox')}>Inbox</Chip>
-          {state.baskets.map(b =>
-            <Chip key={b.id} active={addDest === b.id} onClick={() => setAddDest(b.id)}>{b.name}</Chip>
-          )}
-        </div>
-      </div>
+      )}
+
+      {todayPickOpen && todayTasks.length < TODAY_CAP && (() => {
+        const candidates = openTasks.filter(t => !state.today.ids.includes(t.id))
+        return (
+          <div style={{
+            marginTop: 10, paddingTop: 10, borderTop: `1px solid ${c.hair}`,
+            display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto',
+          }}>
+            {candidates.length === 0 && (
+              <div style={{ ...mono, fontSize: 10.5, color: c.faint }}>
+                No open tasks to pick — add some in Projects or via Quick add.
+              </div>
+            )}
+            {candidates.map(t => (
+              <button
+                key={t.id}
+                className="fr-row"
+                onClick={() => { addToToday(t.id); if (state.today.ids.length + 1 >= TODAY_CAP) setTodayPickOpen(false) }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 9, width: '100%',
+                  textAlign: 'left', padding: '7px 9px', borderRadius: 8,
+                  background: 'transparent', border: '1px solid transparent', cursor: 'pointer',
+                }}
+              >
+                <span style={{ color: c.accent, fontSize: 13, fontWeight: 700 }}>+</span>
+                <span style={{ ...T.body, fontSize: 13.5, color: c.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                <Tag>{t.mins}m</Tag>
+              </button>
+            ))}
+          </div>
+        )
+      })()}
     </Card>
   )
+
+  const hideToggle = (
+    <Btn size="sm" variant={hideCompleted ? 'soft' : 'outline'} onClick={() => setHideCompleted(v => !v)}>
+      {hideCompleted ? 'Show completed' : 'Hide completed'}
+    </Btn>
+  )
+
+  /* ----- sidebar account footer (Google sign-in / signed-in user) ----- */
+  // Only present when sync is configured (client id + API base). The GIS
+  // button itself is rendered into gisRef by the effect above.
+  const accountSection = SYNC_ON ? (
+    <div style={{ marginTop: 12, paddingTop: 14, borderTop: `1px solid ${c.hair}` }}>
+      {auth ? (
+        // Distinct key from the sign-in branch so React unmounts the Google
+        // button's <div> rather than reusing it — GIS injects DOM outside
+        // React's knowledge, and a reused node keeps that orphaned button.
+        <div key="acct-user" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {auth.user.picture && <img src={auth.user.picture} alt="" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
+            <div style={{ ...mono, fontSize: 9.5, color: syncErr ? c.down : c.up }}>{syncErr ? 'sync paused' : 'synced'}</div>
+          </div>
+          <button
+            onClick={signOut}
+            aria-label="Sign out"
+            title="Sign out"
+            className="fr-press"
+            style={{
+              width: 30, height: 30, borderRadius: 8, flexShrink: 0, padding: 0,
+              background: 'transparent', border: `1px solid ${c.hair}`,
+              color: c.dim, cursor: 'pointer', fontSize: 14, lineHeight: 1,
+            }}
+          >⏻</button>
+        </div>
+      ) : (
+        <div key="acct-signin">
+          <div ref={gisRef} style={{ display: 'flex', justifyContent: 'center', colorScheme: 'light' }} />
+          <div style={{ ...mono, fontSize: 9.5, color: c.faint, marginTop: 8, lineHeight: 1.5 }}>
+            Sign in to sync across devices.
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null
+
+  const drawerProject = state.baskets.find(b => b.id === selectedId) ?? null
 
   return (
-    <div style={{ minHeight: '100vh', padding: '26px 18px 76px', position: 'relative', zIndex: 1 }}>
+    <div className="fr-shell" style={{ minHeight: '100vh', position: 'relative', zIndex: 1 }}>
       <style>{`
         .fr-btn{transition:transform .08s ease, filter .15s ease, box-shadow .2s ease;}
         .fr-btn:hover{filter:brightness(1.09);}
@@ -951,424 +1703,595 @@ export default function App() {
         .fr-in:focus{border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-soft);}
         .fr-row{transition:border-color .16s ease, background .16s ease;}
         .fr-row:hover{border-color:var(--line);}
-        .fr-tab{transition:color .16s ease, background .16s ease;}
         .fr-sel:hover{border-color:var(--line);color:var(--text-2);}
         @keyframes frPulse{0%,100%{opacity:1}50%{opacity:.4}}
-        .fr-side{display:flex; flex-direction:column; gap:16px;}
+        @keyframes frEq{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
         .fr-main{display:flex; flex-direction:column; gap:18px;}
-        .fr-workcol{min-width:0; display:flex; flex-direction:column; gap:18px;}
+        .fr-focuscol{min-width:0; display:flex; flex-direction:column; gap:18px;}
+        .fr-plancol{min-width:0; display:flex; flex-direction:column; gap:16px;}
+        .fr-ambient{display:flex; flex-direction:column; gap:16px;}
         .fr-pomo{min-height:300px;}
+        .fr-nav{cursor:pointer;}
+        .fr-mi:not(:disabled):hover{background:var(--surface-3);}
+        .fr-nav:not([aria-current="page"]):not([aria-pressed="true"]):hover{background:var(--surface-2);color:var(--text-2);}
+        .fr-sidenav{
+          position:fixed; top:0; bottom:0; left:0; width:272px; max-width:86vw;
+          background:var(--surface); border-right:1px solid var(--hair);
+          padding:22px 14px;
+          padding-top:max(22px, env(safe-area-inset-top));
+          padding-bottom:max(22px, env(safe-area-inset-bottom));
+          display:flex; flex-direction:column; z-index:60;
+          transform:translateX(-101%); transition:transform .24s cubic-bezier(.2,.7,.2,1);
+        }
+        .fr-sidenav-open{transform:translateX(0); box-shadow:var(--shadow-lift);}
+        .fr-backdrop{
+          position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:59;
+          opacity:0; pointer-events:none; transition:opacity .22s ease;
+        }
+        .fr-backdrop-open{opacity:1; pointer-events:auto;}
+        .fr-topbar-mobile{display:flex; align-items:center; justify-content:space-between; gap:12px;}
+        .fr-content{min-width:0; padding:26px 18px 76px;}
+        .fr-modal-backdrop{
+          position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:80;
+          display:grid; place-items:center; padding:18px;
+        }
+        .fr-modal{animation:frModalIn .18s cubic-bezier(.2,.7,.2,1);}
+        @keyframes frModalIn{from{opacity:0; transform:translateY(8px) scale(.97)} to{opacity:1; transform:none}}
+        .fr-drawer-backdrop{
+          position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:74;
+          animation:frFade .2s ease;
+        }
+        @keyframes frFade{from{opacity:0} to{opacity:1}}
+        .fr-drawer{
+          position:fixed; top:0; right:0; bottom:0; width:min(460px, 94vw);
+          background:var(--surface); border-left:1px solid var(--hair); z-index:75;
+          display:flex; flex-direction:column; padding:24px 22px;
+          padding-top:max(24px, env(safe-area-inset-top));
+          padding-bottom:max(24px, env(safe-area-inset-bottom));
+          overflow-y:auto; box-shadow:var(--shadow-lift);
+          animation:frDrawerIn .26s cubic-bezier(.2,.7,.2,1);
+        }
+        @keyframes frDrawerIn{from{transform:translateX(101%)} to{transform:translateX(0)}}
         @media (min-width:981px){
-          .fr-main{display:grid; grid-template-columns:minmax(0,1fr) 326px; gap:18px; align-items:start;}
-          /* items stretch to row height so the router/pomodoro pair share a bottom edge */
-          .fr-workcol{display:grid; gap:18px;}
-          .fr-pomo{min-height:360px;}
-          .lay-Paired .fr-workcol{grid-template-columns:minmax(0,1.55fr) minmax(264px,1fr); grid-template-areas:"quick quick" "router pomo" "inbox inbox";}
-          .lay-Stacked .fr-workcol{grid-template-columns:1fr; grid-template-areas:"quick" "router" "pomo" "inbox";}
-          .lay-Split .fr-workcol{grid-template-columns:minmax(0,1.55fr) minmax(264px,1fr); grid-template-areas:"router pomo" "inbox inbox";}
+          .fr-shell{display:grid; grid-template-columns:248px minmax(0,1fr);}
+          .fr-sidenav{
+            position:sticky; top:0; height:100vh; height:100dvh;
+            width:auto; max-width:none; align-self:start;
+            transform:none; transition:none; box-shadow:none;
+          }
+          .fr-backdrop{display:none;}
+          .fr-topbar-mobile{display:none;}
+          /* Option C — ambient widgets in a top strip; focus zone (router
+             stacked over pomodoro) + plan zone (capture + today) side by side */
+          .fr-main{
+            display:grid; gap:16px; align-items:start;
+            grid-template-columns:minmax(0,1.55fr) minmax(320px,1fr);
+          }
+          .fr-content{padding:20px 18px 28px;}
+          .fr-focuscol{display:flex; flex-direction:column; gap:14px;}
+          .fr-plancol{display:flex; flex-direction:column; gap:16px;}
+          .fr-ambient{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:18px;}
+          .fr-pomo{min-height:248px;}
         }
       `}</style>
 
+      <SideNav
+        view={view}
+        onView={(v) => { setView(v); setSelectedId(null); setCustomize(false) }}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        inboxCount={inbox.filter(t => !t.done).length}
+        projectCount={state.baskets.length}
+        footer={accountSection}
+      />
+      <div
+        className={'fr-backdrop' + (sidebarOpen ? ' fr-backdrop-open' : '')}
+        onClick={() => setSidebarOpen(false)}
+        aria-hidden="true"
+      />
+      {/* Root-mounted so the stream keeps playing across tab switches. */}
+      <audio
+        ref={audioRef}
+        src={STATIONS[station].url}
+        preload="none"
+        onError={() => { if (musicOn) { setMusicErr(true); setMusicOn(false) } }}
+      />
+      <main className="fr-content">
       <div style={{ maxWidth: 1120, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: SP.xl }}>
 
-        {/* ---------- header ---------- */}
+        {/* ---------- mobile topbar (hamburger opens the sidebar drawer) ---------- */}
+        <div className="fr-topbar-mobile">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            aria-label="Open menu"
+            aria-expanded={sidebarOpen}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 42, height: 42, borderRadius: 'var(--r-ctrl)',
+              border: `1px solid ${c.hair}`, background: c.surface,
+              color: c.text, fontSize: 17,
+            }}
+          >☰</button>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <Mark size={24} />
+            <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Focus Router</span>
+          </span>
+          <span style={{ width: 42 }} aria-hidden="true" />
+        </div>
+
+        {/* ---------- header: page title + date ---------- */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Mark />
-            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Focus Router</span>
-          </div>
-          <div style={{
-            ...mono, fontSize: 11, color: c.dim, letterSpacing: '0.02em',
-            border: `1px solid ${c.hair}`, borderRadius: 999, padding: '6px 13px', background: c.surface,
-          }}>
-            {new Date().toLocaleDateString('en', { weekday: 'long', day: 'numeric', month: 'short' }).toUpperCase()}
+          <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
+            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : 'Projects'}
+          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              className="fr-btn"
+              onClick={() => setStatsOpen(true)}
+              aria-haspopup="dialog"
+              aria-label="Open deep work stats"
+              title="Deep work stats"
+              style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 30, height: 30, borderRadius: 999, padding: 0,
+                border: `1px solid ${c.hair}`, background: c.surface, color: c.dim,
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 14 14" aria-hidden="true">
+                <rect x="1" y="7" width="3" height="6" rx="1" fill="currentColor" />
+                <rect x="5.5" y="4" width="3" height="9" rx="1" fill="currentColor" />
+                <rect x="10" y="1" width="3" height="12" rx="1" fill="currentColor" />
+              </svg>
+            </button>
+            <button
+              className="fr-btn"
+              onClick={() => setCustomize(true)}
+              aria-haspopup="dialog"
+              aria-label="Open customize"
+              title="Customize"
+              style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 30, height: 30, borderRadius: 999, padding: 0,
+                border: `1px solid ${c.hair}`, background: c.surface, color: c.dim, fontSize: 14,
+              }}
+            >⚙</button>
+            {btc && btc.p !== undefined && (
+              <span
+                title="Bitcoin · 24h change"
+                style={{
+                  ...mono, fontSize: 11, display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap',
+                  border: `1px solid ${c.hair}`, borderRadius: 999, padding: '6px 13px', background: c.surface,
+                }}
+              >
+                <span style={{ color: c.faint }}>BTC</span>
+                <span style={{ color: c.text2, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>${btc.p.toLocaleString()}</span>
+                <span style={{ color: (btc.c ?? 0) >= 0 ? c.up : c.down }}>{(btc.c ?? 0) >= 0 ? '▲' : '▼'}{Math.abs(btc.c ?? 0).toFixed(1)}%</span>
+              </span>
+            )}
+            <div style={{
+              ...mono, fontSize: 11, color: c.dim, letterSpacing: '0.02em',
+              border: `1px solid ${c.hair}`, borderRadius: 999, padding: '6px 13px', background: c.surface,
+            }}>
+              {new Date().toLocaleDateString('en', { weekday: 'long', day: 'numeric', month: 'short' }).toUpperCase()}
+            </div>
           </div>
         </div>
 
-        {/* ---------- toolbar: tabs + customize ---------- */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{
-            display: 'inline-flex', gap: 3, padding: 3,
-            background: c.surface, borderRadius: 999, border: `1px solid ${c.hair}`,
-          }}>
-            {([['today', 'Today'], ['projects', 'Projects']] as const).map(([k, lbl]) => {
-              const on = tab === k
-              return (
-                <button key={k} className="fr-tab" onClick={() => setTab(k)} style={{
-                  fontFamily: 'var(--sans)', fontSize: 13, fontWeight: 600, letterSpacing: '0.005em',
-                  borderRadius: 999, padding: '8px 20px', border: 'none',
-                  background: on ? c.accent : 'transparent',
-                  color: on ? c.accentInk : c.dim,
-                  boxShadow: on ? '0 0 16px -6px var(--accent-glow)' : 'none',
-                }}>{lbl}</button>
-              )
-            })}
-          </div>
-          <Btn variant={customize ? 'soft' : 'neutral'} size="sm" onClick={() => setCustomize(!customize)}>
-            <span style={{ fontSize: 14 }}>⚙</span> Customize
-          </Btn>
-        </div>
-
-        {/* ---------- customize drawer ---------- */}
-        {customize && (
-          <Card label="Customize">
-            {/* widgets */}
-            <div style={{ ...T.kicker, fontSize: 10, color: c.faint, marginBottom: 10 }}>Widgets</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(196px, 1fr))', gap: 10 }}>
-              {([
-                ['word', 'Word of the day'],
-                ['tip', 'Random tip'],
-                ['book', 'Book to read'],
-                ['habit', 'Daily habit'],
-                ['btc', 'BTC price'],
-                ['stats', 'Deep work stats'],
-              ] as [WidgetId, string][]).map(([id, name]) => (
-                <label key={id} style={{
-                  display: 'flex', alignItems: 'center', gap: 11,
-                  border: `1px solid ${c.hair}`, borderRadius: 10, padding: '10px 12px',
-                  cursor: 'pointer', background: c.surface2,
-                }}>
-                  <Toggle on={state.widgets[id]} onClick={() => toggleWidget(id)} />
-                  <span style={{ fontSize: 13, fontWeight: 500, color: c.text2 }}>{name}</span>
-                </label>
-              ))}
-            </div>
-
-            {/* layout */}
-            <div style={{ ...T.kicker, fontSize: 10, color: c.faint, margin: '18px 0 10px' }}>Layout</div>
-            <Segmented options={LAYOUT_OPTIONS} value={state.tweaks.layout} onChange={(v) => setTweak('layout', v)} />
-
-            {/* accent */}
-            <div style={{ ...T.kicker, fontSize: 10, color: c.faint, margin: '18px 0 10px' }}>Accent</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {ACCENT_OPTIONS.map(hex => {
-                const on = state.tweaks.accent.toLowerCase() === hex.toLowerCase()
-                return (
-                  <button
-                    key={hex}
-                    onClick={() => setTweak('accent', hex)}
-                    aria-pressed={on}
-                    title={hex}
-                    style={{
-                      width: 30, height: 30, borderRadius: 999, padding: 0, cursor: 'pointer',
-                      background: hex,
-                      border: `2px solid ${on ? '#fff' : c.hair}`,
-                      boxShadow: on ? `0 0 14px -2px ${hex}99` : 'none',
-                    }}
-                  />
-                )
-              })}
-            </div>
-
-            <div style={{ marginTop: 18, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-              <Btn size="sm" onClick={exportJSON}>⤓ Export data (JSON)</Btn>
-              <span style={{ ...mono, fontSize: 10.5, color: c.faint }}>back up your tasks & stats</span>
-            </div>
-          </Card>
-        )}
-
-        {/* ================= TODAY ================= */}
-        {tab === 'today' && (
+        {/* ================= DASHBOARD ================= */}
+        {view === 'dashboard' && (
           <Fragment>
-            {state.tweaks.layout === 'Split' && qaCard}
-            <div className={'fr-main lay-' + state.tweaks.layout}>
-              <div className="fr-workcol">
-                {state.tweaks.layout !== 'Split' && qaCard}
-
-                {/* ROUTER */}
-                <Card label="Router" style={{ display: 'flex', flexDirection: 'column', gridArea: 'router' }} dim={inFocus}>
-                  <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Energy</span>
-                    <Segmented options={ENERGIES} value={energy} onChange={setEnergy} />
-                    <span style={{ ...mono, fontSize: 10, color: c.faint }}>auto-set by time · tap to correct</span>
-                  </div>
-
-                  {suggestion ? (
-                    <div style={{ marginTop: 22, display: 'flex', flexDirection: 'column', flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{
-                          width: 6, height: 6, borderRadius: '50%',
-                          background: c.accent, boxShadow: '0 0 10px 0 var(--accent-glow)',
-                        }} />
-                        <span style={{ ...T.kicker, fontSize: 10, color: c.accent }}>Now do</span>
-                      </div>
-                      <div style={{ ...T.suggestion, color: c.text, margin: '12px 0 14px' }}>
-                        {suggestion.task.title}
-                      </div>
-                      <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-                        {suggestion.why.map((w, i) =>
-                          <Tag key={i} tone={i === 0 ? 'accent' : undefined}>{w}</Tag>
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', gap: 10, marginTop: 'auto', paddingTop: 24, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <Btn
-                          variant="primary"
-                          onClick={() => startTask(suggestion.task)}
-                          style={{ fontSize: 14, padding: '13px 22px' }}
-                        >{`▶ Start · ${suggestion.task.mins} min`}</Btn>
-                        <Btn
-                          variant="outline"
-                          onClick={() => setSkipped([...skipped, suggestion.task.id])}
-                        >↻ Re-route</Btn>
-                        {skipped.length > 0 && (
-                          <Btn variant="ghost" size="sm" onClick={() => setSkipped([])}>
-                            reset skips ({skipped.length})
-                          </Btn>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ marginTop: 26, ...T.body, color: c.dim }}>
-                      {openTasks.length === 0
-                        ? 'Nothing queued. Add a task above — it routes instantly.'
-                        : 'All matches skipped — reset skips or add a task.'}
-                      {skipped.length > 0 && (
-                        <div style={{ marginTop: 14 }}>
-                          <Btn size="sm" onClick={() => setSkipped([])}>reset skips</Btn>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </Card>
-
-                {/* POMODORO */}
-                <Card
-                  label={timer.phase === 'break' ? 'Break' : 'Pomodoro'}
-                  glow={timer.phase !== 'idle'}
-                  className="fr-pomo"
-                  style={{
-                    display: 'flex', flexDirection: 'column', alignItems: 'center',
-                    justifyContent: 'center', gap: 18, gridArea: 'pomo',
-                  }}
-                >
-                  {timer.phase === 'idle' && (
-                    <Fragment>
-                      <TimerRing mode="idle">
-                        <div style={{ ...mono, fontSize: 32, fontWeight: 700, color: c.faint, fontVariantNumeric: 'tabular-nums' }}>25:00</div>
-                      </TimerRing>
-                      <div style={{ ...mono, fontSize: 10.5, color: c.faint, textAlign: 'center', maxWidth: 210, lineHeight: 1.55 }}>
-                        idle — start a task from the router, or run freestyle
-                      </div>
-                      <div style={{ display: 'flex', gap: 7 }}>
-                        {[10, 25, 60].map(m => (
-                          <Btn
-                            key={m}
-                            size="sm"
-                            onClick={() => setTimer({ phase: 'work', taskId: null, left: m * 60, total: m * 60, running: true, endsAt: Date.now() + m * 60 * 1000 })}
-                          >{`▶ ${m}m`}</Btn>
-                        ))}
-                      </div>
-                    </Fragment>
-                  )}
-
-                  {timer.phase === 'work' && (
-                    <Fragment>
-                      <TimerRing mode="work" progress={progress}>
-                        <div style={{ textAlign: 'center' }}>
-                          <div style={{ ...mono, fontSize: 44, fontWeight: 700, color: c.text, fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>
-                            {fmtClock(timer.left)}
-                          </div>
-                          <div style={{
-                            ...T.kicker, fontSize: 9, color: c.accent, marginTop: 5,
-                            animation: timer.running ? 'frPulse 2s ease-in-out infinite' : 'none',
-                          }}>{timer.running ? '● focusing' : 'paused'}</div>
-                        </div>
-                      </TimerRing>
-                      <div style={{ ...T.bodyStrong, textAlign: 'center', color: c.text, minHeight: 20, maxWidth: 240 }}>
-                        {currentTask
-                          ? currentTask.title
-                          : <span style={{ ...mono, color: c.faint, fontWeight: 400 }}>free session</span>}
-                      </div>
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        <Btn
-                          size="sm" variant="primary"
-                          onClick={() => setTimer(t => t.running
-                            ? { ...t, running: false, endsAt: null }
-                            : { ...t, running: true, endsAt: Date.now() + t.left * 1000 })}
-                        >{timer.running ? '⏸ Pause' : '▶ Resume'}</Btn>
-                        <Btn
-                          size="sm" variant="outline"
-                          onClick={() => setTimer(t => ({ ...t, phase: 'outcome', running: false, endsAt: null }))}
-                        >■ End early</Btn>
-                      </div>
-                    </Fragment>
-                  )}
-
-                  {timer.phase === 'outcome' && (
-                    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 11 }}>
-                      <div style={{ ...T.kicker, fontSize: 11, color: c.text2, textAlign: 'center' }}>How did it go?</div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-                        <OutcomeButton variant="complete"   glyph="✓" label="Completed" sub="task done — mark it off"         onClick={() => recordOutcome('complete')} />
-                        <OutcomeButton variant="partial"    glyph="◐" label="Partial"   sub="made progress, more to go"         onClick={() => recordOutcome('partial')} />
-                        <OutcomeButton variant="distracted" glyph="✗" label="Distracted" sub="lost focus — no guilt"             onClick={() => recordOutcome('distracted')} />
-                      </div>
-                      <div style={{ ...mono, fontSize: 9.5, color: c.faint, textAlign: 'center', lineHeight: 1.5 }}>
-                        ✗ also eases your energy down — just routing, not judgment
-                      </div>
-                    </div>
-                  )}
-
-                  {timer.phase === 'break' && (
-                    <Fragment>
-                      <TimerRing mode="break" progress={progress}>
-                        <div style={{ ...mono, fontSize: 38, fontWeight: 700, color: c.text, fontVariantNumeric: 'tabular-nums' }}>
-                          {fmtClock(timer.left)}
-                        </div>
-                      </TimerRing>
-                      <div style={{ ...mono, fontSize: 10.5, color: c.dim, textAlign: 'center', maxWidth: 230, lineHeight: 1.6 }}>
-                        break — stand up, water, look far away
-                        {suggestion && (
-                          <div style={{ marginTop: 7, color: c.text2, fontFamily: 'var(--sans)' }}>
-                            next up: <b style={{ color: c.text }}>{suggestion.task.title}</b>
-                          </div>
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        {suggestion && (
-                          <Btn size="sm" variant="primary" onClick={() => startTask(suggestion.task)}>▶ Start next</Btn>
-                        )}
-                        <Btn
-                          size="sm" variant="outline"
-                          onClick={() => setTimer({ phase: 'idle', taskId: null, left: 0, total: 0, running: false, endsAt: null })}
-                        >Skip break</Btn>
-                      </div>
-                    </Fragment>
-                  )}
-                </Card>
-
-                {/* INBOX */}
-                <Card
-                  label="Inbox"
-                  right={`${inbox.filter(t => !t.done).length} open`}
-                  style={{ gridArea: 'inbox' }}
-                  dim={inFocus}
-                >
-                  {inbox.length === 0 && (
-                    <div style={{ ...mono, fontSize: 11, color: c.faint }}>
-                      Empty. Quick-add lands here by default.
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {[...inbox].sort((a, b) => Number(a.done) - Number(b.done)).map(inboxRow)}
-                  </div>
-                </Card>
+            {/* AMBIENT ROW — music · word · book across the top */}
+            {(wMusic || wWord || wTip) && (
+              <div className="fr-ambient">
+                {wMusic}
+                {wWord}
+                {wTip}
+              </div>
+            )}
+            <div className="fr-main">
+            {/* FOCUS ZONE — router hero stacked over the pomodoro */}
+            <div className="fr-focuscol">
+            {/* ROUTER */}
+            <Card label="Router" style={{ display: 'flex', flexDirection: 'column' }} dim={inFocus}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Energy</span>
+                <Segmented options={ENERGIES} value={energy} onChange={setEnergy} />
+                <span style={{ ...mono, fontSize: 10, color: c.faint }}>auto-set by time · tap to correct</span>
               </div>
 
-              <aside className="fr-side">
-                {wStats}{wHabit}{wWord}{wTip}{wBook}{wBtc}
-              </aside>
+              {suggestion ? (
+                <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{
+                      width: 6, height: 6, borderRadius: '50%',
+                      background: c.accent, boxShadow: '0 0 10px 0 var(--accent-glow)',
+                    }} />
+                    <span style={{ ...T.kicker, fontSize: 10, color: c.accent }}>Now do</span>
+                  </div>
+                  <div style={{ ...T.suggestion, color: c.text, margin: '10px 0 12px' }}>
+                    {suggestion.task.title}
+                  </div>
+                  <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                    {suggestion.why.map((w, i) =>
+                      <Tag key={i} tone={i === 0 ? 'accent' : undefined}>{w}</Tag>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 10, marginTop: 'auto', paddingTop: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <Btn
+                      variant="primary"
+                      onClick={() => startTask(suggestion.task)}
+                      style={{ fontSize: 14, padding: '13px 22px' }}
+                    >{`▶ Start · ${suggestion.task.mins} min`}</Btn>
+                    <Btn
+                      variant="outline"
+                      onClick={() => setSkipped([...skipped, suggestion.task.id])}
+                    >↻ Re-route</Btn>
+                    {skipped.length > 0 && (
+                      <Btn variant="ghost" size="sm" onClick={() => setSkipped([])}>
+                        reset skips ({skipped.length})
+                      </Btn>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 26, ...T.body, color: c.dim }}>
+                  {openTasks.length === 0
+                    ? 'Nothing queued. Add a task above — it routes instantly.'
+                    : 'All matches skipped — reset skips or add a task.'}
+                  {skipped.length > 0 && (
+                    <div style={{ marginTop: 14 }}>
+                      <Btn size="sm" onClick={() => setSkipped([])}>reset skips</Btn>
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+
+            {/* POMODORO */}
+            <Card
+              label={timer.phase === 'break' ? 'Break' : 'Pomodoro'}
+              glow={timer.phase !== 'idle'}
+              className="fr-pomo"
+              style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center',
+                justifyContent: 'center', gap: 14,
+              }}
+            >
+              {timer.phase === 'idle' && (
+                <Fragment>
+                  <TimerRing mode="idle">
+                    <div style={{ ...mono, fontSize: 32, fontWeight: 700, color: c.faint, fontVariantNumeric: 'tabular-nums' }}>25:00</div>
+                  </TimerRing>
+                  <div style={{ ...mono, fontSize: 10.5, color: c.faint, textAlign: 'center', maxWidth: 210, lineHeight: 1.55 }}>
+                    idle — start a task from the router, or run freestyle
+                  </div>
+                  <div style={{ display: 'flex', gap: 7 }}>
+                    {[10, 25, 60].map(m => (
+                      <Btn
+                        key={m}
+                        size="sm"
+                        onClick={() => setTimer({ phase: 'work', taskId: null, left: m * 60, total: m * 60, running: true, endsAt: Date.now() + m * 60 * 1000 })}
+                      >{`▶ ${m}m`}</Btn>
+                    ))}
+                  </div>
+                </Fragment>
+              )}
+
+              {timer.phase === 'work' && (
+                <Fragment>
+                  <TimerRing mode="work" progress={progress}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ ...mono, fontSize: 44, fontWeight: 700, color: c.text, fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>
+                        {fmtClock(timer.left)}
+                      </div>
+                      <div style={{
+                        ...T.kicker, fontSize: 9, color: c.accent, marginTop: 5,
+                        animation: timer.running ? 'frPulse 2s ease-in-out infinite' : 'none',
+                      }}>{timer.running ? '● focusing' : 'paused'}</div>
+                    </div>
+                  </TimerRing>
+                  <div style={{ ...T.bodyStrong, textAlign: 'center', color: c.text, minHeight: 20, maxWidth: 240 }}>
+                    {currentTask
+                      ? currentTask.title
+                      : <span style={{ ...mono, color: c.faint, fontWeight: 400 }}>free session</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Btn
+                      size="sm" variant="primary"
+                      onClick={() => setTimer(t => t.running
+                        ? { ...t, running: false, endsAt: null }
+                        : { ...t, running: true, endsAt: Date.now() + t.left * 1000 })}
+                    >{timer.running ? '⏸ Pause' : '▶ Resume'}</Btn>
+                    <Btn
+                      size="sm" variant="outline"
+                      onClick={() => setTimer(t => ({ ...t, phase: 'outcome', running: false, endsAt: null }))}
+                    >■ End early</Btn>
+                  </div>
+                </Fragment>
+              )}
+
+              {timer.phase === 'outcome' && (
+                <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 11 }}>
+                  <div style={{ ...T.kicker, fontSize: 11, color: c.text2, textAlign: 'center' }}>How did it go?</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                    <OutcomeButton variant="complete"   glyph="✓" label="Completed" sub="task done — mark it off"         onClick={() => recordOutcome('complete')} />
+                    <OutcomeButton variant="partial"    glyph="◐" label="Partial"   sub="made progress, more to go"         onClick={() => recordOutcome('partial')} />
+                    <OutcomeButton variant="distracted" glyph="✗" label="Distracted" sub="lost focus — no guilt"             onClick={() => recordOutcome('distracted')} />
+                  </div>
+                  <div style={{ ...mono, fontSize: 9.5, color: c.faint, textAlign: 'center', lineHeight: 1.5 }}>
+                    ✗ also eases your energy down — just routing, not judgment
+                  </div>
+                </div>
+              )}
+
+              {timer.phase === 'break' && (
+                <Fragment>
+                  <TimerRing mode="break" progress={progress}>
+                    <div style={{ ...mono, fontSize: 38, fontWeight: 700, color: c.text, fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtClock(timer.left)}
+                    </div>
+                  </TimerRing>
+                  <div style={{ ...mono, fontSize: 10.5, color: c.dim, textAlign: 'center', maxWidth: 230, lineHeight: 1.6 }}>
+                    break — stand up, water, look far away
+                    {suggestion && (
+                      <div style={{ marginTop: 7, color: c.text2, fontFamily: 'var(--sans)' }}>
+                        next up: <b style={{ color: c.text }}>{suggestion.task.title}</b>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {suggestion && (
+                      <Btn size="sm" variant="primary" onClick={() => startTask(suggestion.task)}>▶ Start next</Btn>
+                    )}
+                    <Btn
+                      size="sm" variant="outline"
+                      onClick={() => setTimer({ phase: 'idle', taskId: null, left: 0, total: 0, running: false, endsAt: null })}
+                    >Skip break</Btn>
+                  </div>
+                </Fragment>
+              )}
+            </Card>
+
+            </div>
+
+            {/* PLAN ZONE — capture + today's committed list */}
+            <aside className="fr-plancol">
+              {qaCard}
+              {todayCard}
+            </aside>
             </div>
           </Fragment>
         )}
 
-        {/* ================= PROJECTS ================= */}
-        {tab === 'projects' && (
-          <Fragment>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <label className="fr-field" style={{ ...fieldStyle, flex: '0 1 280px' }}>
+        {/* ================= INBOX (tasks without a project) ================= */}
+        {view === 'inbox' && (() => {
+          const all = state.tasks.filter(t => !t.basketId)
+          const shown = (hideCompleted ? all.filter(t => !t.done) : all).sort((a, b) => Number(a.done) - Number(b.done))
+          const openN = all.filter(t => !t.done).length
+          return (
+            <Card style={{ minWidth: 0, maxWidth: 760 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 15, minHeight: 30 }}>
+                <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Inbox</span>
+                <span style={{ ...mono, fontSize: 11, color: c.faint }}>{openN} open · no project</span>
+                <span style={{ flex: 1 }} />
+                {all.some(t => t.done) && hideToggle}
+              </div>
+              {shown.length === 0 && (
+                <div style={{ ...mono, fontSize: 11, color: c.faint, marginBottom: 8 }}>
+                  {all.length === 0 ? 'Empty. Add a loose task below — or capture from the Dashboard.' : 'No open tasks — nicely done.'}
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {shown.map(t => taskRow(t))}
                 <input
-                  value={newBasket}
-                  onChange={(e) => setNewBasket(e.target.value)}
+                  className="fr-in"
+                  placeholder="+ add task…  (enter)"
+                  value={basketInputs['inbox'] ?? ''}
+                  onChange={(e) => setBasketInputs({ ...basketInputs, inbox: e.target.value })}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && newBasket.trim()) {
-                      setState(s => ({ ...s, baskets: [...s.baskets, { id: uid(), name: newBasket.trim() }] }))
-                      setNewBasket('')
+                    const v = (basketInputs['inbox'] ?? '').trim()
+                    if (e.key === 'Enter' && v) {
+                      setState(s => ({ ...s, tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: null, done: false, createdAt: Date.now() }] }))
+                      setBasketInputs({ ...basketInputs, inbox: '' })
                     }
                   }}
-                  placeholder="New basket name…"
-                  style={inputStyle}
+                  style={{
+                    fontFamily: 'var(--sans)', fontSize: 13,
+                    border: `1px dashed ${c.line}`, borderRadius: 10,
+                    padding: '10px 12px', outline: 'none', background: 'transparent', color: c.text,
+                  }}
                 />
-              </label>
-              <Btn variant="primary" onClick={() => {
-                if (newBasket.trim()) {
-                  setState(s => ({ ...s, baskets: [...s.baskets, { id: uid(), name: newBasket.trim() }] }))
-                  setNewBasket('')
-                }
-              }}>+ Basket</Btn>
-            </div>
-            <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-              {state.baskets.map(b => {
-                const ts = state.tasks.filter(t => t.basketId === b.id)
+              </div>
+            </Card>
+          )
+        })()}
+
+        {/* ================= PROJECTS (4 lanes) ================= */}
+        {view === 'projects' && (() => {
+          const ongoingCount = state.baskets.filter(b => b.status === 'ongoing').length
+          const dragged = dragId ? (state.baskets.find(x => x.id === dragId) ?? null) : null
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 880 }}>
+              {BASKET_STATUSES.map(lane => {
+                const projs = state.baskets.filter(b => b.status === lane.key)
+                const laneKey = 'newproj:' + lane.key
+                const ongoingFull = lane.key === 'ongoing' && ongoingCount >= ONGOING_CAP
+                // A full Ongoing lane rejects drops (unless the card is already ongoing).
+                const accepts = !!dragId && !(ongoingFull && dragged?.status !== 'ongoing')
                 return (
-                  <Card
-                    key={b.id}
-                    label={b.name}
-                    right={`${ts.filter(t => !t.done).length} open`}
-                    style={{ flex: '1 1 300px', minWidth: 300 }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {[...ts].sort((a, x) => Number(a.done) - Number(x.done)).map(t => (
-                        <div key={t.id} className="fr-row" style={{
-                          border: `1px solid ${c.hair}`, borderRadius: 10, background: c.surface2,
-                          padding: '9px 11px', display: 'flex', alignItems: 'center', gap: 11,
-                          opacity: t.done ? 0.42 : 1,
-                        }}>
-                          <CheckBox done={t.done} onClick={() => toggleDone(t.id)} />
-                          <span style={{ ...T.taskTitle, textDecoration: t.done ? 'line-through' : 'none', flex: 1, color: c.text }}>{t.title}</span>
-                          <Tag>{t.mins}m</Tag>
-                          <MoveSelect onChange={(v) => {
-                            if (!v) return
-                            if (v === 'del') removeTask(t.id)
-                            else if (v === 'inbox') moveTask(t.id, null)
-                            else moveTask(t.id, v)
-                          }}>
-                            <option value="">⋯</option>
-                            <option value="inbox">→ Inbox (today)</option>
-                            {state.baskets.filter(x => x.id !== b.id).map(x =>
-                              <option key={x.id} value={x.id}>→ {x.name}</option>
-                            )}
-                            <option value="del">delete</option>
-                          </MoveSelect>
-                        </div>
-                      ))}
+                  <section key={lane.key}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 11 }}>
+                      <span style={{ ...T.kicker, fontSize: 10.5, color: lane.key === 'ongoing' ? c.accent : c.dim }}>{lane.label}</span>
+                      <span style={{ ...mono, fontSize: 10.5, color: c.faint }}>
+                        {lane.key === 'ongoing' ? `${ongoingCount}/${ONGOING_CAP}` : projs.length}
+                      </span>
+                    </div>
+                    <div
+                      onDragOver={(e) => { if (accepts) { e.preventDefault(); if (overLane !== lane.key) setOverLane(lane.key) } }}
+                      onDrop={(e) => { e.preventDefault(); if (accepts && dragId) setBasketStatus(dragId, lane.key); setDragId(null); setOverLane(null) }}
+                      style={{
+                        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(224px, 1fr))', gap: 10,
+                        borderRadius: 12, padding: 5, margin: -5,
+                        outline: accepts && overLane === lane.key ? `2px dashed ${c.accentLine}` : '2px dashed transparent',
+                        background: accepts && overLane === lane.key ? c.accentSoft : 'transparent',
+                        transition: 'background .15s ease, outline-color .15s ease',
+                      }}
+                    >
+                      {projs.map(b => {
+                        const open = state.tasks.filter(t => t.basketId === b.id && !t.done).length
+                        const total = state.tasks.filter(t => t.basketId === b.id).length
+                        return (
+                          <button
+                            key={b.id}
+                            className="fr-row"
+                            draggable
+                            onDragStart={(e) => { setDragId(b.id); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', b.id) } catch { /* ignore */ } }}
+                            onDragEnd={() => { setDragId(null); setOverLane(null) }}
+                            onClick={() => setSelectedId(b.id)}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                              background: c.surface2, border: `1px solid ${dragId === b.id ? c.accentLine : c.hair}`, borderRadius: 12,
+                              padding: '13px 14px', cursor: 'grab', minWidth: 0,
+                              opacity: dragId === b.id ? 0.4 : 1,
+                            }}
+                          >
+                            <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: b.color, flexShrink: 0 }} />
+                            <span style={{ ...T.bodyStrong, color: c.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
+                            <span style={{ ...mono, fontSize: 10.5, color: c.faint, flexShrink: 0 }}>{open}/{total}</span>
+                            <span aria-hidden="true" style={{ color: c.faint, fontSize: 14, flexShrink: 0 }}>›</span>
+                          </button>
+                        )
+                      })}
                       <input
                         className="fr-in"
-                        placeholder="+ add task…  (enter)"
-                        value={basketInputs[b.id] ?? ''}
-                        onChange={(e) => setBasketInputs({ ...basketInputs, [b.id]: e.target.value })}
+                        aria-label={`New ${lane.label} project`}
+                        placeholder={ongoingFull ? 'Ongoing is full (2/2)' : '+ new project…'}
+                        disabled={ongoingFull}
+                        value={basketInputs[laneKey] ?? ''}
+                        onChange={(e) => setBasketInputs({ ...basketInputs, [laneKey]: e.target.value })}
                         onKeyDown={(e) => {
-                          const v = (basketInputs[b.id] ?? '').trim()
-                          if (e.key === 'Enter' && v) {
-                            setState(s => ({
-                              ...s,
-                              tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: b.id, done: false, createdAt: Date.now() }],
-                            }))
-                            setBasketInputs({ ...basketInputs, [b.id]: '' })
-                          }
+                          const v = (basketInputs[laneKey] ?? '').trim()
+                          if (e.key === 'Enter' && v) { createBasket(v, lane.key); setBasketInputs({ ...basketInputs, [laneKey]: '' }) }
                         }}
                         style={{
-                          fontFamily: 'var(--sans)', fontSize: 13,
-                          border: `1px dashed ${c.line}`, borderRadius: 10,
-                          padding: '10px 12px', outline: 'none', background: 'transparent', color: c.text,
+                          fontFamily: 'var(--sans)', fontSize: 13, minWidth: 0,
+                          border: `1px dashed ${c.line}`, borderRadius: 12,
+                          padding: '13px 14px', outline: 'none', background: 'transparent',
+                          color: c.text, opacity: ongoingFull ? 0.5 : 1,
                         }}
                       />
                     </div>
-                    <div style={{ marginTop: 12, textAlign: 'right' }}>
-                      <button
-                        onClick={() => {
-                          if (ts.length === 0 || confirm(`Delete "${b.name}" and its ${ts.length} task(s)?`)) {
-                            setState(s => ({
-                              ...s,
-                              baskets: s.baskets.filter(x => x.id !== b.id),
-                              tasks: s.tasks.filter(t => t.basketId !== b.id),
-                            }))
-                            if (addDest === b.id) setAddDest('inbox')
-                          }
-                        }}
-                        style={{
-                          ...mono, fontSize: 9.5, color: c.faint,
-                          border: 'none', background: 'none', cursor: 'pointer',
-                          letterSpacing: '0.04em', textTransform: 'uppercase',
-                        }}
-                      >delete basket</button>
-                    </div>
-                  </Card>
+                  </section>
                 )
               })}
             </div>
-          </Fragment>
-        )}
+          )
+        })()}
       </div>
+      </main>
+
+      {/* ---------- project drawer (slides in from the right) ---------- */}
+      {drawerProject && (() => {
+        const b = drawerProject
+        const all = state.tasks.filter(t => t.basketId === b.id)
+        const shown = (hideCompleted ? all.filter(t => !t.done) : all).sort((x, y) => Number(x.done) - Number(y.done))
+        const openN = all.filter(t => !t.done).length
+        const laneLabel = BASKET_STATUSES.find(s => s.key === b.status)?.label ?? ''
+        const ongoingFull = state.baskets.filter(x => x.status === 'ongoing').length >= ONGOING_CAP
+        const addKey = 'drawer:' + b.id
+        const detailMenu: MenuEntry[] = [
+          { kind: 'label', label: 'Move to lane' },
+          ...BASKET_STATUSES.filter(s => s.key !== b.status).map<MenuEntry>(s => ({
+            kind: 'item',
+            label: s.label + (s.key === 'ongoing' && ongoingFull ? ' (full)' : ''),
+            onClick: () => setBasketStatus(b.id, s.key),
+            disabled: s.key === 'ongoing' && ongoingFull,
+          })),
+          { kind: 'divider' },
+          { kind: 'item', label: 'Rename', onClick: () => setDetailEditing(true) },
+          { kind: 'colors', value: b.color, onPick: (hex) => setBasketColor(b.id, hex) },
+          { kind: 'divider' },
+          { kind: 'item', label: 'Delete project', onClick: () => deleteBasket(b), danger: true },
+        ]
+        return (
+          <Fragment>
+            <div className="fr-drawer-backdrop" onClick={() => setSelectedId(null)} aria-hidden="true" />
+            <aside className="fr-drawer" role="dialog" aria-modal="true" aria-label={`Project: ${b.name}`}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                {detailEditing ? (
+                  <InlineEdit
+                    value={b.name}
+                    onCommit={(v) => { renameBasket(b.id, v); setDetailEditing(false) }}
+                    onCancel={() => setDetailEditing(false)}
+                    style={{ fontSize: 19, fontWeight: 700, flex: 1, minWidth: 0 }}
+                  />
+                ) : (
+                  <span
+                    onClick={() => setDetailEditing(true)}
+                    title="Rename"
+                    style={{ fontSize: 21, fontWeight: 700, letterSpacing: '-0.02em', color: b.color, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'text' }}
+                  >{b.name}</span>
+                )}
+                <MenuButton ariaLabel={`Options for project "${b.name}"`} entries={detailMenu} />
+                <button
+                  onClick={() => setSelectedId(null)}
+                  aria-label="Close project"
+                  style={{ width: 30, height: 30, borderRadius: 8, border: 'none', background: c.surface2, color: c.dim, cursor: 'pointer', fontSize: 14, flexShrink: 0 }}
+                >✕</button>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, minHeight: 28 }}>
+                <span style={{ ...mono, fontSize: 11, color: c.faint, whiteSpace: 'nowrap' }}>{laneLabel.toLowerCase()} · {openN} open</span>
+                <span style={{ flex: 1 }} />
+                {all.some(t => t.done) && hideToggle}
+              </div>
+              {shown.length === 0 && (
+                <div style={{ ...mono, fontSize: 11, color: c.faint, marginBottom: 8 }}>
+                  {all.length === 0 ? 'No tasks yet — add the first below.' : 'No open tasks — all done.'}
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {shown.map(t => taskRow(t))}
+                <input
+                  className="fr-in"
+                  placeholder="+ add task…  (enter)"
+                  value={basketInputs[addKey] ?? ''}
+                  onChange={(e) => setBasketInputs({ ...basketInputs, [addKey]: e.target.value })}
+                  onKeyDown={(e) => {
+                    const v = (basketInputs[addKey] ?? '').trim()
+                    if (e.key === 'Enter' && v) {
+                      setState(s => ({ ...s, tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: b.id, done: false, createdAt: Date.now() }] }))
+                      setBasketInputs({ ...basketInputs, [addKey]: '' })
+                    }
+                  }}
+                  style={{
+                    fontFamily: 'var(--sans)', fontSize: 13,
+                    border: `1px dashed ${c.line}`, borderRadius: 10,
+                    padding: '10px 12px', outline: 'none', background: 'transparent', color: c.text,
+                  }}
+                />
+              </div>
+            </aside>
+          </Fragment>
+        )
+      })()}
+      {statsModal}
+      {customizeModal}
+      {undoState && (
+        <div
+          className="fr-modal"
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed', left: 0, right: 0, bottom: 22, margin: '0 auto', width: 'fit-content',
+            zIndex: 90, background: c.surface2, border: `1px solid ${c.line}`, borderRadius: 12,
+            boxShadow: 'var(--shadow-lift)', padding: '8px 8px 8px 16px',
+            display: 'flex', alignItems: 'center', gap: 12,
+          }}
+        >
+          <span style={{ fontFamily: 'var(--sans)', fontSize: 13, color: c.text }}>{undoState.msg}</span>
+          <Btn size="sm" variant="soft" onClick={undoDelete}>Undo</Btn>
+        </div>
+      )}
     </div>
   )
 }

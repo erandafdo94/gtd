@@ -13,7 +13,7 @@ cache stay local to each browser.
 
 - **Frontend**: React 18 + Vite + TypeScript, plain React with inline styles
 - **Backend**: ASP.NET Core 10 Minimal APIs, EF Core, Npgsql
-- **Database**: Postgres 16 (run locally via Docker Compose)
+- **Database**: Postgres 16 (a local instance on `:5432`)
 - **Auth**: Google OAuth (ID-token flow) → app-issued JWT
 
 ## Develop
@@ -22,7 +22,7 @@ cache stay local to each browser.
 
 - Node 20+
 - .NET 10 SDK
-- Docker (for the local Postgres)
+- Postgres 16 running locally on `:5432`
 - A Google OAuth 2.0 Client ID (Web application, with `http://localhost:5173`
   in **Authorized JavaScript origins**). Create one at
   <https://console.cloud.google.com/apis/credentials>.
@@ -36,14 +36,16 @@ cache stay local to each browser.
 # Frontend deps
 npm install
 
-# Postgres (binds to 127.0.0.1:5433; adminer on :8081)
-cd ../backend
-docker compose up -d postgres
+# Local Postgres — create the database on your :5432 instance. The default
+# connection string lives in backend/FocusRouter.Api/appsettings.json.
+createdb -h localhost -p 5432 -U postgres focus   # or: CREATE DATABASE focus;
 
-# Backend DB schema
+# Backend schema applies automatically on `dotnet run` (Program.cs migrates on
+# startup). To apply it manually instead:
+cd ../backend
 dotnet ef database update --project FocusRouter.Api
 
-# Configure secrets — JWT signing key + Google client id
+# Configure the Google client id
 dotnet user-secrets --project FocusRouter.Api \
   set "Google:ClientId" "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
 

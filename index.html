@@ -15,19 +15,19 @@
          DM Sans (UI) + Space Mono (data). One electric pop: #ff5a36. */
       :root {
         /* surfaces — near-black canvas, layered graphite panels */
-        --bg:         #0b0c0f;
-        --bg-deep:    #07080a;
-        --surface:    #14161b;
-        --surface-2:  #1b1e25;
-        --surface-3:  #23272f;
-        --hair:       #262a33;
-        --line:       #323742;
+        --bg:         #0d0f13;
+        --bg-deep:    #08090c;
+        --surface:    #161922;
+        --surface-2:  #1f232c;
+        --surface-3:  #2a2f3a;
+        --hair:       #333947;
+        --line:       #434a59;
 
-        /* ink */
-        --text:       #edeef2;
-        --text-2:     #b4b8c2;
-        --dim:        #888d99;
-        --faint:      #5b606c;
+        /* ink — tuned for high contrast / readability */
+        --text:       #f4f5f8;
+        --text-2:     #d3d7e0;
+        --dim:        #aeb3c0;
+        --faint:      #868c9c;
 
         /* the one accent */
         --accent:     #ff5a36;
@@ -64,19 +64,12 @@
       }
       #root { min-height: 100vh; position: relative; }
 
-      /* techy canvas: faint dot grid + a single warm glow up top */
-      body::before {
-        content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
-        background-image: radial-gradient(rgba(255,255,255,0.035) 1px, transparent 1px);
-        background-size: 22px 22px;
-        -webkit-mask-image: radial-gradient(130% 80% at 50% -10%, #000 40%, transparent 100%);
-                mask-image: radial-gradient(130% 80% at 50% -10%, #000 40%, transparent 100%);
-      }
+      /* minimal canvas: a single, very subtle warm glow up top (no dot grid) */
       body::after {
-        content: ""; position: fixed; top: -240px; left: 50%; transform: translateX(-50%);
-        width: 900px; height: 520px; pointer-events: none; z-index: 0;
-        background: radial-gradient(ellipse at center, rgba(255,90,54,0.10), transparent 68%);
-        filter: blur(8px);
+        content: ""; position: fixed; top: -260px; left: 50%; transform: translateX(-50%);
+        width: 820px; height: 460px; pointer-events: none; z-index: 0;
+        background: radial-gradient(ellipse at center, rgba(255,90,54,0.05), transparent 70%);
+        filter: blur(10px);
       }
 
       button { font-family: inherit; cursor: pointer; }
