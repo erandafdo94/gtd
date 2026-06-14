@@ -1070,13 +1070,15 @@ export default function App() {
     .filter((t): t is Task => !!t)
 
   const suggestion = useMemo(() => {
-    const pool = openTasks.filter(t => !skipped.includes(t.id) && t.id !== timer.taskId)
+    // GTD "Engage" works off *clarified* lists, never the inbox. Inbox items
+    // are unprocessed capture — they're ineligible for NOW DO until filed into
+    // a project (see the Clarify nudge in the Router card).
+    const pool = openTasks.filter(t => t.basketId && !skipped.includes(t.id) && t.id !== timer.taskId)
     if (!pool.length) return null
     const scored = pool.map(t => {
       let s = 0
       const gap = Math.abs(E_SCORE[t.energy] - E_SCORE[energy])
       s += (2 - gap) * 100
-      if (!t.basketId) s += 30
       s += Math.min(daysOld(t.createdAt), 10) * 3
       // Committed-for-today picks outrank everything but a hard energy clash.
       if (state.today.ids.includes(t.id)) s += 150
@@ -1152,6 +1154,21 @@ export default function App() {
 
   const moveTask = (id: string, basketId: string | null) =>
     setState(s => ({ ...s, tasks: s.tasks.map(t => (t.id === id ? { ...t, basketId } : t)) }))
+
+  // Clarify: an inbox item that's really a multi-step outcome becomes its own
+  // project. The item's text names the project (the desired outcome); the loose
+  // task is consumed, and we open the new project so you can define the next
+  // action — the GTD move when capture turns out to be a project.
+  const makeProjectFromTask = (t: Task) => {
+    const id = uid()
+    setState(s => ({
+      ...s,
+      baskets: [...s.baskets, { id, name: t.title, status: 'next', color: PROJECT_COLORS[s.baskets.length % PROJECT_COLORS.length] }],
+      tasks: s.tasks.filter(x => x.id !== t.id),
+    }))
+    setView('projects')
+    setSelectedId(id)
+  }
 
   const createBasket = (name: string, status: BasketStatus = 'backlog') => {
     const v = name.trim()
@@ -1319,6 +1336,10 @@ export default function App() {
         kind: 'item', label: 'Add to today', onClick: () => addToToday(t.id),
         disabled: t.done || state.today.ids.includes(t.id) || state.today.ids.length >= TODAY_CAP,
       },
+      ...(t.basketId === null
+        ? [{ kind: 'divider' } as MenuEntry, { kind: 'label', label: 'Clarify' } as MenuEntry,
+           { kind: 'item', label: 'Make a project', onClick: () => makeProjectFromTask(t) } as MenuEntry]
+        : []),
       { kind: 'label', label: 'Move to' },
       ...(t.basketId !== null ? [{ kind: 'item', label: 'Inbox', onClick: () => moveTask(t.id, null) } as MenuEntry] : []),
       ...state.baskets.filter(x => x.id !== t.basketId && !x.completedAt).map<MenuEntry>(x => ({
@@ -1931,6 +1952,30 @@ export default function App() {
                 <span style={{ ...mono, fontSize: 10, color: c.faint }}>auto-set by time · tap to correct</span>
               </div>
 
+              {/* Clarify nudge — process the inbox to zero; the router won't
+                  serve unfiled capture, so surface it here instead. */}
+              {(() => {
+                const toClarify = inbox.filter(t => !t.done).length
+                if (toClarify === 0) return null
+                return (
+                  <button
+                    onClick={() => setView('inbox')}
+                    className="fr-press"
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left',
+                      marginTop: 14, background: c.surface2, border: `1px solid ${c.line}`, borderRadius: 10,
+                      padding: '9px 13px', cursor: 'pointer',
+                    }}
+                  >
+                    <span aria-hidden="true" style={{ color: c.accent, fontSize: 13 }}>▦</span>
+                    <span style={{ ...T.body, fontSize: 12.5, color: c.text2, flex: 1 }}>
+                      {toClarify} {toClarify === 1 ? 'item' : 'items'} to clarify in your inbox
+                    </span>
+                    <span style={{ ...T.bodyStrong, fontSize: 12.5, color: c.accent }}>Clarify →</span>
+                  </button>
+                )
+              })()}
+
               {suggestion ? (
                 <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1967,9 +2012,11 @@ export default function App() {
                 </div>
               ) : (
                 <div style={{ marginTop: 26, ...T.body, color: c.dim }}>
-                  {openTasks.length === 0
-                    ? 'Nothing queued. Add a task above — it routes instantly.'
-                    : 'All matches skipped — reset skips or add a task.'}
+                  {openTasks.some(t => t.basketId)
+                    ? 'All matches skipped — reset skips or add a task.'
+                    : inbox.some(t => !t.done)
+                      ? 'Nothing filed yet — clarify your inbox above, then it routes.'
+                      : 'Nothing queued. Add a task to a project — it routes instantly.'}
                   {skipped.length > 0 && (
                     <div style={{ marginTop: 14 }}>
                       <Btn size="sm" onClick={() => setSkipped([])}>reset skips</Btn>
