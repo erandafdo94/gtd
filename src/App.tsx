@@ -29,8 +29,11 @@ type Task = {
   doneAt?: number
 }
 
-type BasketStatus = 'ongoing' | 'next' | 'backlog' | 'someday'
-type Basket = { id: string; name: string; status: BasketStatus; color: string }
+type BasketStatus = 'ongoing' | 'maintenance' | 'next' | 'backlog' | 'someday'
+// `completedAt` (epoch ms) marks a finished project. Completed projects leave
+// the four lanes and collapse into the Completed shelf; their tasks are left
+// untouched so reopening restores the project exactly as it was.
+type Basket = { id: string; name: string; status: BasketStatus; color: string; completedAt?: number }
 
 type DayStats = {
   pomos: number
@@ -125,8 +128,11 @@ const ENERGIES: Energy[] = ['Low', 'Med', 'High']
 const ACCENT_OPTIONS = ['#ff5a36', '#4f8cff', '#2ad17f', '#9a6bff']
 
 // GTD-style project lanes. Ongoing is the active-focus lane and is hard-capped.
+// Maintenance is GTD's "area of responsibility" — perpetual upkeep that's live
+// but shouldn't compete for an Ongoing slot, so it's uncapped.
 const BASKET_STATUSES: { key: BasketStatus; label: string }[] = [
   { key: 'ongoing', label: 'Ongoing' },
+  { key: 'maintenance', label: 'Maintenance' },
   { key: 'next', label: 'Up next' },
   { key: 'backlog', label: 'Backlog' },
   { key: 'someday', label: 'Someday / maybe' },
@@ -779,13 +785,15 @@ export default function App() {
   // The project whose right-side drawer is open (null = none).
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detailEditing, setDetailEditing] = useState(false)
+  // Completed-projects shelf at the bottom of the Projects tab (collapsed by default).
+  const [completedOpen, setCompletedOpen] = useState(false)
   // Hide completed tasks in the Inbox + project drawer lists (on by default).
   const [hideCompleted, setHideCompleted] = useState(true)
   // Drag-and-drop of project cards between lanes (HTML5 DnD, no library).
   const [dragId, setDragId] = useState<string | null>(null)
   const [overLane, setOverLane] = useState<BasketStatus | null>(null)
   // Deleted-project snapshot for the undo toast (replaces confirm dialogs)
-  const [undoState, setUndoState] = useState<{ msg: string; baskets: Basket[]; tasks: Task[] } | null>(null)
+  const [undoState, setUndoState] = useState<{ msg: string; undo: () => void } | null>(null)
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // today card
@@ -1049,7 +1057,13 @@ export default function App() {
   }, [timer])
 
   /* ----- derived ----- */
-  const openTasks = state.tasks.filter(t => !t.done)
+  // Tasks belonging to a completed (archived) project are excluded from the
+  // active focus surfaces — the suggestion engine and the Today picker — so
+  // ending a project actually stops it pulling at your attention. The task
+  // records themselves are kept (visible in the project drawer, restored on
+  // reopen); only their done/open state is left untouched.
+  const doneBasketIds = useMemo(() => new Set(state.baskets.filter(b => b.completedAt).map(b => b.id)), [state.baskets])
+  const openTasks = state.tasks.filter(t => !t.done && !(t.basketId && doneBasketIds.has(t.basketId)))
   const inbox = state.tasks.filter(t => !t.basketId)
   const todayTasks = state.today.ids
     .map(id => state.tasks.find(t => t.id === id))
@@ -1087,10 +1101,10 @@ export default function App() {
     let title = input.trim()
     if (!title) return
     let basketId: string | null = addDest === 'inbox' ? null : addDest
-    // The selected destination may have been deleted in the Projects tab —
-    // a dead basketId would make the task invisible (not in inbox, not in
-    // any basket). Fall back to inbox.
-    if (basketId && !state.baskets.some(b => b.id === basketId)) basketId = null
+    // The selected destination may have been deleted or completed in the
+    // Projects tab — a dead/archived basketId would strand the task. Fall
+    // back to inbox.
+    if (basketId && !state.baskets.some(b => b.id === basketId && !b.completedAt)) basketId = null
     const hash = title.match(/#(\S+)/)
     if (hash) {
       const b = state.baskets.find(x => x.name.toLowerCase().includes(hash[1].toLowerCase()))
@@ -1145,7 +1159,7 @@ export default function App() {
     const id = uid()
     setState(s => {
       // Respect the Ongoing cap on creation — overflow lands in Up next.
-      const lane: BasketStatus = status === 'ongoing' && s.baskets.filter(b => b.status === 'ongoing').length >= ONGOING_CAP ? 'next' : status
+      const lane: BasketStatus = status === 'ongoing' && s.baskets.filter(b => b.status === 'ongoing' && !b.completedAt).length >= ONGOING_CAP ? 'next' : status
       return { ...s, baskets: [...s.baskets, { id, name: v, status: lane, color: PROJECT_COLORS[s.baskets.length % PROJECT_COLORS.length] }] }
     })
     setView('projects')
@@ -1160,6 +1174,13 @@ export default function App() {
   const setBasketColor = (id: string, color: string) =>
     setState(s => ({ ...s, baskets: s.baskets.map(x => (x.id === id ? { ...x, color } : x)) }))
 
+  // Show a transient "X · Undo" toast that reverts via the given closure.
+  const offerUndo = (msg: string, undo: () => void) => {
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+    setUndoState({ msg, undo })
+    undoTimer.current = setTimeout(() => setUndoState(null), 6000)
+  }
+
   // No confirm dialog — delete immediately, offer Undo for a few seconds.
   const deleteBasket = (b: Basket) => {
     const ts = state.tasks.filter(t => t.basketId === b.id)
@@ -1170,21 +1191,32 @@ export default function App() {
     }))
     if (addDest === b.id) setAddDest('inbox')
     if (selectedId === b.id) setSelectedId(null)
-    if (undoTimer.current) clearTimeout(undoTimer.current)
-    setUndoState({ msg: `Deleted "${b.name}"`, baskets: [b], tasks: ts })
-    undoTimer.current = setTimeout(() => setUndoState(null), 6000)
+    offerUndo(`Deleted "${b.name}"`, () =>
+      setState(s => ({ ...s, baskets: [...s.baskets, b], tasks: [...s.tasks, ...ts] })))
   }
 
-  const undoDelete = () => {
+  // Complete a project: it leaves the lanes for the Completed shelf. Tasks are
+  // left as-is, so Reopen (or Undo) restores it exactly.
+  const completeBasket = (b: Basket) => {
+    setState(s => ({ ...s, baskets: s.baskets.map(x => (x.id === b.id ? { ...x, completedAt: Date.now() } : x)) }))
+    if (selectedId === b.id) setSelectedId(null)
+    offerUndo(`Completed "${b.name}"`, () =>
+      setState(s => ({ ...s, baskets: s.baskets.map(x => (x.id === b.id ? { ...x, completedAt: undefined } : x)) })))
+  }
+
+  const reopenBasket = (id: string) =>
+    setState(s => ({ ...s, baskets: s.baskets.map(x => (x.id === id ? { ...x, completedAt: undefined } : x)) }))
+
+  const runUndo = () => {
     if (!undoState) return
-    setState(s => ({ ...s, baskets: [...s.baskets, ...undoState.baskets], tasks: [...s.tasks, ...undoState.tasks] }))
+    undoState.undo()
     setUndoState(null)
     if (undoTimer.current) clearTimeout(undoTimer.current)
   }
 
   const setBasketStatus = (id: string, status: BasketStatus) =>
     setState(s => {
-      const ongoing = s.baskets.filter(b => b.status === 'ongoing' && b.id !== id).length
+      const ongoing = s.baskets.filter(b => b.status === 'ongoing' && !b.completedAt && b.id !== id).length
       if (status === 'ongoing' && ongoing >= ONGOING_CAP) return s
       return { ...s, baskets: s.baskets.map(b => (b.id === id ? { ...b, status } : b)) }
     })
@@ -1289,7 +1321,7 @@ export default function App() {
       },
       { kind: 'label', label: 'Move to' },
       ...(t.basketId !== null ? [{ kind: 'item', label: 'Inbox', onClick: () => moveTask(t.id, null) } as MenuEntry] : []),
-      ...state.baskets.filter(x => x.id !== t.basketId).map<MenuEntry>(x => ({
+      ...state.baskets.filter(x => x.id !== t.basketId && !x.completedAt).map<MenuEntry>(x => ({
         kind: 'item', label: x.name, onClick: () => moveTask(t.id, x.id),
       })),
       { kind: 'divider' },
@@ -1536,7 +1568,7 @@ export default function App() {
           }}
         >
           <option value="inbox">Inbox</option>
-          {state.baskets.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          {state.baskets.filter(b => !b.completedAt).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
       </div>
     </Card>
@@ -1781,7 +1813,7 @@ export default function App() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         inboxCount={inbox.filter(t => !t.done).length}
-        projectCount={state.baskets.length}
+        projectCount={state.baskets.filter(b => !b.completedAt).length}
         footer={accountSection}
       />
       <div
@@ -2108,12 +2140,13 @@ export default function App() {
 
         {/* ================= PROJECTS (4 lanes) ================= */}
         {view === 'projects' && (() => {
-          const ongoingCount = state.baskets.filter(b => b.status === 'ongoing').length
+          const ongoingCount = state.baskets.filter(b => b.status === 'ongoing' && !b.completedAt).length
           const dragged = dragId ? (state.baskets.find(x => x.id === dragId) ?? null) : null
+          const completed = state.baskets.filter(b => b.completedAt).sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 880 }}>
               {BASKET_STATUSES.map(lane => {
-                const projs = state.baskets.filter(b => b.status === lane.key)
+                const projs = state.baskets.filter(b => b.status === lane.key && !b.completedAt)
                 const laneKey = 'newproj:' + lane.key
                 const ongoingFull = lane.key === 'ongoing' && ongoingCount >= ONGOING_CAP
                 // A full Ongoing lane rejects drops (unless the card is already ongoing).
@@ -2184,6 +2217,53 @@ export default function App() {
                   </section>
                 )
               })}
+
+              {/* ---------- Completed shelf (archive; reopenable) ---------- */}
+              {completed.length > 0 && (
+                <section style={{ borderTop: `1px solid ${c.surface3}`, paddingTop: 16 }}>
+                  <button
+                    onClick={() => setCompletedOpen(o => !o)}
+                    aria-expanded={completedOpen}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 9, marginBottom: completedOpen ? 12 : 0,
+                      background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                    }}
+                  >
+                    <span aria-hidden="true" style={{ color: c.dim, fontSize: 11, display: 'inline-block', transform: completedOpen ? 'none' : 'rotate(-90deg)', transition: 'transform .15s ease' }}>▾</span>
+                    <span style={{ ...T.kicker, fontSize: 10.5, color: c.dim }}>Completed</span>
+                    <span style={{ ...mono, fontSize: 10.5, color: c.faint }}>{completed.length}</span>
+                  </button>
+                  {completedOpen && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {completed.map(b => {
+                        const total = state.tasks.filter(t => t.basketId === b.id).length
+                        return (
+                          <div
+                            key={b.id}
+                            className="fr-row"
+                            onClick={() => setSelectedId(b.id)}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                              background: c.surface2, border: `1px solid ${c.surface3}`, borderRadius: 12,
+                              padding: '11px 14px', cursor: 'pointer', minWidth: 0, opacity: 0.72,
+                            }}
+                          >
+                            <span aria-hidden="true" style={{ color: b.color, fontSize: 15, flexShrink: 0, lineHeight: 1 }}>✓</span>
+                            <span style={{ ...T.bodyStrong, color: c.dim, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'line-through', textDecorationColor: c.faint }}>{b.name}</span>
+                            {total > 0 && <span style={{ ...mono, fontSize: 10.5, color: c.faint, flexShrink: 0 }}>{total} {total === 1 ? 'task' : 'tasks'}</span>}
+                            <span style={{ ...mono, fontSize: 10.5, color: c.faint, flexShrink: 0 }}>{new Date(b.completedAt!).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); reopenBasket(b.id) }}
+                              className="fr-press"
+                              style={{ fontFamily: 'var(--sans)', fontSize: 11.5, color: c.dim, background: 'transparent', border: `1px solid ${c.line}`, borderRadius: 7, padding: '3px 9px', cursor: 'pointer', flexShrink: 0 }}
+                            >Reopen</button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
           )
         })()}
@@ -2196,23 +2276,37 @@ export default function App() {
         const all = state.tasks.filter(t => t.basketId === b.id)
         const shown = (hideCompleted ? all.filter(t => !t.done) : all).sort((x, y) => Number(x.done) - Number(y.done))
         const openN = all.filter(t => !t.done).length
-        const laneLabel = BASKET_STATUSES.find(s => s.key === b.status)?.label ?? ''
-        const ongoingFull = state.baskets.filter(x => x.status === 'ongoing').length >= ONGOING_CAP
+        const isDone = !!b.completedAt
+        const laneLabel = isDone
+          ? `completed · ${new Date(b.completedAt!).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+          : (BASKET_STATUSES.find(s => s.key === b.status)?.label ?? '')
+        const ongoingFull = state.baskets.filter(x => x.status === 'ongoing' && !x.completedAt).length >= ONGOING_CAP
         const addKey = 'drawer:' + b.id
-        const detailMenu: MenuEntry[] = [
-          { kind: 'label', label: 'Move to lane' },
-          ...BASKET_STATUSES.filter(s => s.key !== b.status).map<MenuEntry>(s => ({
-            kind: 'item',
-            label: s.label + (s.key === 'ongoing' && ongoingFull ? ' (full)' : ''),
-            onClick: () => setBasketStatus(b.id, s.key),
-            disabled: s.key === 'ongoing' && ongoingFull,
-          })),
-          { kind: 'divider' },
-          { kind: 'item', label: 'Rename', onClick: () => setDetailEditing(true) },
-          { kind: 'colors', value: b.color, onPick: (hex) => setBasketColor(b.id, hex) },
-          { kind: 'divider' },
-          { kind: 'item', label: 'Delete project', onClick: () => deleteBasket(b), danger: true },
-        ]
+        // Completed projects swap the lane controls for a single Reopen action.
+        const detailMenu: MenuEntry[] = isDone
+          ? [
+              { kind: 'item', label: 'Reopen project', onClick: () => reopenBasket(b.id) },
+              { kind: 'divider' },
+              { kind: 'item', label: 'Rename', onClick: () => setDetailEditing(true) },
+              { kind: 'colors', value: b.color, onPick: (hex) => setBasketColor(b.id, hex) },
+              { kind: 'divider' },
+              { kind: 'item', label: 'Delete project', onClick: () => deleteBasket(b), danger: true },
+            ]
+          : [
+              { kind: 'label', label: 'Move to lane' },
+              ...BASKET_STATUSES.filter(s => s.key !== b.status).map<MenuEntry>(s => ({
+                kind: 'item',
+                label: s.label + (s.key === 'ongoing' && ongoingFull ? ' (full)' : ''),
+                onClick: () => setBasketStatus(b.id, s.key),
+                disabled: s.key === 'ongoing' && ongoingFull,
+              })),
+              { kind: 'divider' },
+              { kind: 'item', label: 'Complete project', onClick: () => completeBasket(b) },
+              { kind: 'item', label: 'Rename', onClick: () => setDetailEditing(true) },
+              { kind: 'colors', value: b.color, onPick: (hex) => setBasketColor(b.id, hex) },
+              { kind: 'divider' },
+              { kind: 'item', label: 'Delete project', onClick: () => deleteBasket(b), danger: true },
+            ]
         return (
           <Fragment>
             <div className="fr-drawer-backdrop" onClick={() => setSelectedId(null)} aria-hidden="true" />
@@ -2289,7 +2383,7 @@ export default function App() {
           }}
         >
           <span style={{ fontFamily: 'var(--sans)', fontSize: 13, color: c.text }}>{undoState.msg}</span>
-          <Btn size="sm" variant="soft" onClick={undoDelete}>Undo</Btn>
+          <Btn size="sm" variant="soft" onClick={runUndo}>Undo</Btn>
         </div>
       )}
     </div>
