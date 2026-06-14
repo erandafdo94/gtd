@@ -741,7 +741,6 @@ function SideNav({
         {navItem('dashboard', '◎', 'Dashboard')}
         {navItem('inbox', '▣', 'Inbox', inboxCount)}
         {navItem('projects', '▦', 'Projects', projectCount)}
-        {navItem('settings', '⚙', 'Settings')}
       </nav>
       {footer}
     </aside>
@@ -774,6 +773,8 @@ export default function App() {
   const [pwAddErr, setPwAddErr] = useState<string | null>(null)
   const [pwAddBusy, setPwAddBusy] = useState(false)
   const [pwAddDone, setPwAddDone] = useState(false)
+  const [pwShow, setPwShow] = useState(false)        // show/hide the password field
+  const [pwChanging, setPwChanging] = useState(false) // reveal the form to change an existing password
   const gisRef = useRef<HTMLDivElement | null>(null)
   const pulledRef = useRef(false)
   // "Sign in to sync" nudge for anonymous users — gentle + throttled.
@@ -1023,6 +1024,8 @@ export default function App() {
       const cur = authRef.current
       if (cur) applyAuth({ ...cur, user: { ...cur.user, has_password: true } })
       setPwAddField('')
+      setPwShow(false)
+      setPwChanging(false)
       setPwAddDone(true)
     } catch {
       setPwAddBusy(false)
@@ -1846,53 +1849,50 @@ export default function App() {
     </Btn>
   )
 
-  /* ----- sidebar account footer (Google sign-in / signed-in user) ----- */
-  // Only present when sync is configured (client id + API base). The GIS
-  // button itself is rendered into gisRef by the effect above.
-  const accountSection = SYNC_ON ? (
-    <div style={{ marginTop: 12, paddingTop: 14, borderTop: `1px solid ${c.hair}` }}>
-      {auth ? (
-        // Distinct key from the sign-in branch so React unmounts the Google
-        // button's <div> rather than reusing it — GIS injects DOM outside
-        // React's knowledge, and a reused node keeps that orphaned button.
-        <div key="acct-user">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            {auth.user.picture && <img src={auth.user.picture} alt="" style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0 }} />}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
-              <div style={{ ...mono, fontSize: 9.5, color: syncErr ? c.down : c.up }}>{syncErr ? 'sync paused' : 'synced'}</div>
-            </div>
-            <button
-              onClick={signOut}
-              aria-label="Sign out"
-              title="Sign out"
-              className="fr-press"
-              style={{
-                width: 30, height: 30, borderRadius: 8, flexShrink: 0, padding: 0,
-                background: 'transparent', border: `1px solid ${c.hair}`,
-                color: c.dim, cursor: 'pointer', fontSize: 14, lineHeight: 1,
-              }}
-            >⏻</button>
-          </div>
-        </div>
-      ) : (
-        <div key="acct-signin">
-          <button
-            onClick={() => setSignInOpen(true)}
-            className="fr-press"
-            style={{
-              width: '100%', padding: '9px 12px', borderRadius: 10,
-              background: c.accent, border: 'none', color: '#fff',
-              fontSize: 13, fontWeight: 600, cursor: 'pointer',
-            }}
-          >Sign in to sync</button>
-          <div style={{ ...mono, fontSize: 9.5, color: c.faint, marginTop: 8, lineHeight: 1.5 }}>
-            Optional — sync your tasks across devices.
-          </div>
-        </div>
-      )}
-    </div>
-  ) : null
+  /* ----- sidebar account chip → Settings (single account/settings entry) ----- */
+  // Only present when sync is configured. Sign-in / out / password all live on
+  // the Settings page; this chip just shows status and routes there.
+  const goSettings = () => { setView('settings'); setSelectedId(null); setCustomize(false); setSidebarOpen(false) }
+  const accountSection = SYNC_ON ? (() => {
+    const onSettings = view === 'settings'
+    const initial = (auth?.user.name ?? auth?.user.email ?? '?').trim().charAt(0).toUpperCase()
+    return (
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${c.hair}` }}>
+        <button
+          onClick={goSettings}
+          aria-label="Account & settings"
+          aria-current={onSettings ? 'page' : undefined}
+          className="fr-nav"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left',
+            padding: '8px 10px', borderRadius: 12, cursor: 'pointer', minHeight: 48,
+            border: `1px solid ${onSettings ? c.accentLine : c.hair}`,
+            background: onSettings ? c.accentSoft : c.surface2,
+          }}
+        >
+          {auth?.user.picture ? (
+            <img src={auth.user.picture} alt="" style={{ width: 32, height: 32, borderRadius: '50%', flexShrink: 0 }} />
+          ) : (
+            <span aria-hidden="true" style={{
+              width: 32, height: 32, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center',
+              background: auth ? c.accentSoft : c.surface3, color: auth ? c.accent : c.faint,
+              fontSize: 13, fontWeight: 700, border: `1px solid ${c.hair}`,
+            }}>{auth ? initial : '⚙'}</span>
+          )}
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {auth ? (auth.user.name ?? auth.user.email) : 'Account & sync'}
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5, ...mono, fontSize: 9.5, color: auth ? (syncErr ? c.down : c.up) : c.faint, marginTop: 2 }}>
+              {auth && <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: syncErr ? c.down : c.up, flexShrink: 0 }} />}
+              {auth ? (syncErr ? 'sync paused' : 'synced') : 'not signed in'}
+            </span>
+          </span>
+          <span aria-hidden="true" style={{ color: c.faint, fontSize: 15, flexShrink: 0, lineHeight: 1 }}>›</span>
+        </button>
+      </div>
+    )
+  })() : null
 
   const drawerProject = state.baskets.find(b => b.id === selectedId) ?? null
 
@@ -2342,8 +2342,12 @@ export default function App() {
         })()}
 
         {/* ================= SETTINGS ================= */}
-        {view === 'settings' && (
-          <div style={{ maxWidth: 560, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {view === 'settings' && (() => {
+          const hasPw = !!(auth?.user.has_password || pwAddDone)
+          const showPwForm = auth && (!hasPw || pwChanging)
+          const dividerStyle: CSSProperties = { height: 1, background: c.hair, margin: '14px -2px' }
+          return (
+          <div style={{ maxWidth: 540, display: 'flex', flexDirection: 'column', gap: 16 }}>
             <Card label="Account">
               {!SYNC_ON ? (
                 <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.6 }}>
@@ -2351,58 +2355,141 @@ export default function App() {
                   The app runs fully on this device.
                 </div>
               ) : !auth ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                  <div style={{ ...T.body, fontSize: 13.5, color: c.dim, lineHeight: 1.55 }}>
-                    You’re not signed in. Sign in to sync your tasks across devices —
-                    and to add an email/password login.
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingTop: 2 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
+                    <span aria-hidden="true" style={{
+                      width: 44, height: 44, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center',
+                      background: c.accentSoft, border: `1px solid ${c.accentLine}`,
+                    }}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={c.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M12 2v6m0 8v6M2 12h6m8 0h6" opacity="0" /><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" />
+                      </svg>
+                    </span>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: c.text, letterSpacing: '-0.01em' }}>Sync across devices</div>
+                      <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5, marginTop: 2 }}>
+                        Sign in to back up your tasks and pick up where you left off anywhere.
+                      </div>
+                    </div>
                   </div>
                   <div>
                     <Btn variant="primary" onClick={() => setSignInOpen(true)}>Sign in to sync</Btn>
                   </div>
+                  <div style={{ ...mono, fontSize: 10, color: c.faint, lineHeight: 1.6 }}>
+                    Optional. The app works fully on this device without an account.
+                  </div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  {auth.user.picture && <img src={auth.user.picture} alt="" style={{ width: 40, height: 40, borderRadius: '50%', flexShrink: 0 }} />}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
-                    <div style={{ ...mono, fontSize: 11, color: c.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.email}</div>
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
+                    {auth.user.picture ? (
+                      <img src={auth.user.picture} alt="" style={{ width: 44, height: 44, borderRadius: '50%', flexShrink: 0 }} />
+                    ) : (
+                      <span aria-hidden="true" style={{
+                        width: 44, height: 44, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center',
+                        background: c.accentSoft, color: c.accent, border: `1px solid ${c.accentLine}`, fontSize: 18, fontWeight: 700,
+                      }}>{(auth.user.name ?? auth.user.email).trim().charAt(0).toUpperCase()}</span>
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: c.text, letterSpacing: '-0.01em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{auth.user.name ?? auth.user.email}</div>
+                      <div style={{ ...mono, fontSize: 11, color: c.faint, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>{auth.user.email}</div>
+                    </div>
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                      ...mono, fontSize: 10, color: syncErr ? c.down : c.up,
+                      border: `1px solid ${c.hair}`, borderRadius: 999, padding: '4px 10px', background: c.surface2,
+                    }}>
+                      <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: syncErr ? c.down : c.up }} />
+                      {syncErr ? 'Sync paused' : 'Synced'}
+                    </span>
                   </div>
-                  <Btn variant="outline" size="sm" onClick={signOut}>Sign out</Btn>
-                </div>
+                  <div style={dividerStyle} />
+                  <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                    <Btn variant="outline" size="sm" onClick={signOut}>Sign out</Btn>
+                  </div>
+                </>
               )}
             </Card>
 
             {SYNC_ON && auth && (
-              <Card label="Password">
-                {(auth.user.has_password || pwAddDone) ? (
-                  <div style={{ ...T.body, fontSize: 13.5, color: c.text, lineHeight: 1.55 }}>
-                    <span style={{ color: c.up, fontWeight: 700 }}>✓ Password set.</span>{' '}
-                    You can log in with <b>{auth.user.email}</b> and your password on any device.
+              <Card label="Email & password login">
+                {!showPwForm ? (
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 11 }}>
+                    <span aria-hidden="true" style={{
+                      width: 26, height: 26, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center',
+                      background: 'color-mix(in srgb, var(--up) 16%, transparent)', marginTop: 1,
+                    }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={c.up} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 12.5l4.5 4.5L19 7" />
+                      </svg>
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ ...T.body, fontSize: 13.5, color: c.text, fontWeight: 600 }}>Password set</div>
+                      <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5, marginTop: 2 }}>
+                        You can log in with <b style={{ color: c.text2 }}>{auth.user.email}</b> and your password on any device.
+                      </div>
+                      <button
+                        onClick={() => { setPwChanging(true); setPwAddDone(false); setPwAddField(''); setPwAddErr(null); setPwShow(false) }}
+                        className="fr-press"
+                        style={{ marginTop: 10, background: 'none', border: 'none', padding: 0, color: c.accent, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, fontFamily: 'var(--sans)' }}
+                      >Change password</button>
+                    </div>
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ ...T.body, fontSize: 13, color: c.dim, lineHeight: 1.55 }}>
-                      Add an email/password login for <b style={{ color: c.text }}>{auth.user.email}</b>,
-                      so you can sign in without Google.
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5 }}>
+                      {pwChanging
+                        ? <>Set a new password for <b style={{ color: c.text }}>{auth.user.email}</b>.</>
+                        : <>Add an email/password login for <b style={{ color: c.text }}>{auth.user.email}</b> so you can sign in without Google.</>}
                     </div>
-                    <form onSubmit={e => { e.preventDefault(); submitSetPassword() }} style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 340 }}>
-                      <input
-                        className="fr-in"
-                        type="password"
-                        autoComplete="new-password"
-                        placeholder="New password (min 8 characters)"
-                        value={pwAddField}
-                        onChange={e => setPwAddField(e.target.value)}
-                        style={{
-                          width: '100%', boxSizing: 'border-box', padding: '10px 12px',
-                          borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
-                          fontFamily: 'var(--sans)', fontSize: 14,
-                        }}
-                      />
-                      {pwAddErr && (
-                        <div style={{ ...T.body, fontSize: 12, color: c.down }}>{pwAddErr}</div>
-                      )}
-                      <div>
+                    <form onSubmit={e => { e.preventDefault(); submitSetPassword() }} style={{ display: 'flex', flexDirection: 'column', gap: 7, maxWidth: 360 }}>
+                      <label htmlFor="pw-set" style={{ ...mono, fontSize: 10, color: c.faint, letterSpacing: '0.04em' }}>
+                        {pwChanging ? 'NEW PASSWORD' : 'PASSWORD'}
+                      </label>
+                      <div className="fr-field" style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, padding: '0 6px 0 12px',
+                      }}>
+                        <input
+                          id="pw-set"
+                          className="fr-in"
+                          type={pwShow ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          placeholder="At least 8 characters"
+                          value={pwAddField}
+                          onChange={e => setPwAddField(e.target.value)}
+                          autoFocus
+                          style={{
+                            flex: 1, minWidth: 0, border: 'none', background: 'transparent', color: c.text,
+                            fontFamily: 'var(--sans)', fontSize: 14, padding: '11px 0', outline: 'none',
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setPwShow(v => !v)}
+                          aria-label={pwShow ? 'Hide password' : 'Show password'}
+                          aria-pressed={pwShow}
+                          className="fr-press"
+                          style={{
+                            display: 'grid', placeItems: 'center', width: 32, height: 32, flexShrink: 0,
+                            background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', borderRadius: 8,
+                          }}
+                        >
+                          {pwShow ? (
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c5.5 0 9 6 9 6a13.2 13.2 0 0 1-2.16 2.74M6.5 6.5C3.8 8.1 2 12 2 12s3 6 9 6a8.8 8.8 0 0 0 3.5-.74" /><path d="M3 3l18 18" />
+                            </svg>
+                          ) : (
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M2 12s3-6 10-6 10 6 10 6-3 6-10 6-10-6-10-6Z" /><circle cx="12" cy="12" r="3" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+                      {pwAddErr
+                        ? <div role="alert" style={{ ...T.body, fontSize: 12, color: c.down }}>{pwAddErr}</div>
+                        : <div style={{ ...mono, fontSize: 10, color: c.faint }}>Used together with your email to log in.</div>}
+                      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                         <button
                           type="submit"
                           disabled={pwAddBusy}
@@ -2413,8 +2500,11 @@ export default function App() {
                             cursor: pwAddBusy ? 'default' : 'pointer', opacity: pwAddBusy ? 0.65 : 1,
                           }}
                         >
-                          {pwAddBusy ? 'Saving…' : 'Set password'}
+                          {pwAddBusy ? 'Saving…' : pwChanging ? 'Save password' : 'Set password'}
                         </button>
+                        {pwChanging && (
+                          <Btn variant="ghost" size="sm" onClick={() => { setPwChanging(false); setPwAddField(''); setPwAddErr(null); setPwShow(false) }}>Cancel</Btn>
+                        )}
                       </div>
                     </form>
                   </div>
@@ -2422,7 +2512,8 @@ export default function App() {
               </Card>
             )}
           </div>
-        )}
+          )
+        })()}
 
         {/* ================= PROJECTS (4 lanes) ================= */}
         {view === 'projects' && (() => {
