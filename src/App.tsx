@@ -106,15 +106,17 @@ const WORDS: [string, string][] = [
   ['flow', 'complete absorption in an activity; time disappears'],
 ]
 // Evidence-based learning techniques — one surfaces at random each session.
-const TIPS: [string, string][] = [
-  ['Active recall', 'test yourself instead of rereading — retrieval beats review'],
-  ['Spaced repetition', 'revisit material at growing intervals to beat the forgetting curve'],
-  ['The Feynman technique', 'explain it simply, as if teaching a child — the gaps reveal themselves'],
-  ['Interleaving', 'mix related topics in one session rather than blocking by subject'],
-  ['Teach to learn', "you don't fully understand it until you can explain it to someone else"],
-  ['Elaboration', 'ask why and how — tie new facts to what you already know'],
-  ['Dual coding', 'pair words with visuals — a diagram sticks better than text alone'],
-  ['Chunking', 'group small items into meaningful units to stretch working memory'],
+// Third field is a "read more" link (Wikipedia article, or a search where no
+// single article fits) — destinations verified to resolve.
+const TIPS: [string, string, string][] = [
+  ['Active recall', 'test yourself instead of rereading — retrieval beats review', 'https://en.wikipedia.org/wiki/Active_recall'],
+  ['Spaced repetition', 'revisit material at growing intervals to beat the forgetting curve', 'https://en.wikipedia.org/wiki/Spaced_repetition'],
+  ['The Feynman technique', 'explain it simply, as if teaching a child — the gaps reveal themselves', 'https://en.wikipedia.org/wiki/Feynman_Technique'],
+  ['Interleaving', 'mix related topics in one session rather than blocking by subject', 'https://en.wikipedia.org/wiki/Special:Search?search=interleaving%20learning'],
+  ['Teach to learn', "you don't fully understand it until you can explain it to someone else", 'https://en.wikipedia.org/wiki/Learning_by_teaching'],
+  ['Elaboration', 'ask why and how — tie new facts to what you already know', 'https://en.wikipedia.org/wiki/Elaborative_encoding'],
+  ['Dual coding', 'pair words with visuals — a diagram sticks better than text alone', 'https://en.wikipedia.org/wiki/Dual-coding_theory'],
+  ['Chunking', 'group small items into meaningful units to stretch working memory', 'https://en.wikipedia.org/wiki/Chunking_(psychology)'],
 ]
 // Free 24/7 streams from somafm.com (listener-supported, attribution in the
 // card footer). <audio> playback needs no CORS, so these work from localhost.
@@ -149,7 +151,10 @@ const STORAGE_KEY = 'focus-router-v1'
 const AUTH_KEY = 'focus_auth'
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
-const SYNC_ON = !!GOOGLE_CLIENT_ID && !!API_BASE
+// Sync (pull/push + the account UI) needs only an API base — email/password
+// works without Google. The Google button is gated separately on GOOGLE_ON.
+const SYNC_ON = !!API_BASE
+const GOOGLE_ON = !!GOOGLE_CLIENT_ID && !!API_BASE
 
 const DEFAULT_STATE: State = {
   tasks: [],
@@ -756,8 +761,18 @@ export default function App() {
   // auth / sync (optional)
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [syncErr, setSyncErr] = useState(false)
+  const [signInOpen, setSignInOpen] = useState(false)
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [emailField, setEmailField] = useState('')
+  const [pwField, setPwField] = useState('')
+  const [authErr, setAuthErr] = useState<string | null>(null)
+  const [authBusy, setAuthBusy] = useState(false)
   const gisRef = useRef<HTMLDivElement | null>(null)
   const pulledRef = useRef(false)
+  // "Sign in to sync" nudge for anonymous users — gentle + throttled.
+  const [nudge, setNudge] = useState(false)
+  const nudgedThisSession = useRef(false)
+  const nudgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // quick add
   const [input, setInput] = useState('')
@@ -919,6 +934,15 @@ export default function App() {
     } catch { /* ignore */ }
   }
 
+  // Apply a sign-in response (shared by Google + email/password). Throws if the
+  // payload lacks tokens so callers can surface an error.
+  const applySignInResponse = (d: { token?: string; jwt?: string; refresh_token?: string; user: AuthUser }) => {
+    const token = d.token ?? d.jwt
+    if (!token || !d.refresh_token) throw new Error('no token')
+    applyAuth({ token, refreshToken: d.refresh_token, user: d.user })
+    setSyncErr(false)
+  }
+
   const handleCredential = (idToken: string) => {
     if (!API_BASE) return
     fetch(`${API_BASE}/api/auth/google`, {
@@ -926,13 +950,53 @@ export default function App() {
       body: JSON.stringify({ id_token: idToken }),
     })
       .then(r => (r.ok ? r.json() : Promise.reject(new Error('auth failed'))))
-      .then((d: { token?: string; jwt?: string; refresh_token?: string; user: AuthUser }) => {
-        const token = d.token ?? d.jwt
-        if (!token || !d.refresh_token) throw new Error('no token')
-        applyAuth({ token, refreshToken: d.refresh_token, user: d.user })
-        setSyncErr(false)
-      })
+      .then(applySignInResponse)
+      .then(() => closeSignIn())
       .catch(() => setSyncErr(true))
+  }
+
+  // Email/password register or login. Resolves to an error string (shown in the
+  // modal) or null on success.
+  const handleEmailAuth = async (mode: 'login' | 'register', email: string, password: string): Promise<string | null> => {
+    if (!API_BASE) return 'Sync is not configured'
+    try {
+      const r = await fetch(`${API_BASE}/api/auth/${mode}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+      if (!r.ok) {
+        if (r.status === 409) return 'That email is already in use — try logging in.'
+        if (r.status === 401) return 'Invalid email or password.'
+        if (r.status === 400) {
+          const d = await r.json().catch(() => null) as { error?: string } | null
+          return d?.error ? d.error[0].toUpperCase() + d.error.slice(1) : 'Check your email and password.'
+        }
+        return 'Something went wrong — please try again.'
+      }
+      applySignInResponse(await r.json())
+      return null
+    } catch {
+      return 'Could not reach the server.'
+    }
+  }
+
+  const closeSignIn = () => {
+    setSignInOpen(false)
+    setAuthErr(null)
+    setPwField('')
+    setAuthBusy(false)
+  }
+
+  const submitEmailAuth = async () => {
+    const email = emailField.trim().toLowerCase()
+    if (!email || !pwField) { setAuthErr('Enter your email and password.'); return }
+    if (authMode === 'register' && pwField.length < 8) { setAuthErr('Password must be at least 8 characters.'); return }
+    setAuthBusy(true)
+    setAuthErr(null)
+    const err = await handleEmailAuth(authMode, email, pwField)
+    setAuthBusy(false)
+    if (err) setAuthErr(err)
+    else closeSignIn()
   }
 
   // Exchange the refresh token for a fresh access token (and rotated refresh
@@ -1014,9 +1078,9 @@ export default function App() {
     return () => clearTimeout(t)
   }, [state, auth, loaded])
 
-  /* ----- auth: render the Google button into the sidebar footer ----- */
+  /* ----- auth: render the Google button into the sign-in modal ----- */
   useEffect(() => {
-    if (!loaded || auth || !SYNC_ON) return
+    if (!signInOpen || auth || !GOOGLE_ON) return
     let cancelled = false
     loadGis().then(() => {
       if (cancelled || !gisRef.current) return
@@ -1025,13 +1089,13 @@ export default function App() {
       if (!g?.accounts?.id) return
       g.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: (resp: { credential: string }) => handleCredential(resp.credential) })
       gisRef.current.innerHTML = ''
-      // Fit the button to the sidebar column (GIS clamps width to [200, 400]).
-      const w = Math.max(200, Math.min(400, Math.round(gisRef.current.clientWidth || 220)))
+      // Fit the button to the modal column (GIS clamps width to [200, 400]).
+      const w = Math.max(200, Math.min(400, Math.round(gisRef.current.clientWidth || 300)))
       g.accounts.id.renderButton(gisRef.current, { theme: 'filled_black', size: 'large', text: 'signin_with', shape: 'pill', width: w })
     }).catch(() => { /* blocked / offline */ })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, auth])
+  }, [signInOpen, auth])
 
   /* ----- timer engine ----- */
   // `left` is recomputed from the wall-clock deadline on every tick (and on
@@ -1117,6 +1181,7 @@ export default function App() {
       tasks: [...s.tasks, { id: uid(), title, mins: addMins, energy: addEnergy, basketId, done: false, createdAt: Date.now() }],
     }))
     setInput('')
+    maybeNudge()
   }
 
   const toggleDone = (id: string) =>
@@ -1196,6 +1261,28 @@ export default function App() {
     if (undoTimer.current) clearTimeout(undoTimer.current)
     setUndoState({ msg, undo })
     undoTimer.current = setTimeout(() => setUndoState(null), 6000)
+  }
+
+  // Gently nudge anonymous users to sign in for sync. Fires at most once per
+  // session, ~25% of the time, and never within 10 min of the last nudge or
+  // dismissal (persisted so the cooldown survives reloads). No-op once signed in
+  // or when sync isn't configured.
+  const maybeNudge = () => {
+    if (!SYNC_ON || auth || nudge || nudgedThisSession.current) return
+    let last = 0
+    try { last = Number(localStorage.getItem('focus_nudge_at')) || 0 } catch { /* ignore */ }
+    if (Date.now() - last < 10 * 60 * 1000) return
+    if (Math.random() > 0.25) return
+    nudgedThisSession.current = true
+    try { localStorage.setItem('focus_nudge_at', String(Date.now())) } catch { /* ignore */ }
+    setNudge(true)
+    if (nudgeTimer.current) clearTimeout(nudgeTimer.current)
+    nudgeTimer.current = setTimeout(() => setNudge(false), 8000)
+  }
+
+  const dismissNudge = () => {
+    if (nudgeTimer.current) clearTimeout(nudgeTimer.current)
+    setNudge(false)
   }
 
   // No confirm dialog — delete immediately, offer Undo for a few seconds.
@@ -1382,6 +1469,16 @@ export default function App() {
       <div style={{ ...T.body, fontSize: 11.5, lineHeight: 1.4, color: c.dim, marginTop: 3 }}>
         {TIPS[tipIdx][1]}
       </div>
+      <a
+        href={TIPS[tipIdx][2]}
+        target="_blank"
+        rel="noopener noreferrer"
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 8,
+          fontFamily: 'var(--sans)', fontSize: 11, fontWeight: 600, color: c.accent,
+          textDecoration: 'none', letterSpacing: '0.01em',
+        }}
+      >Read more <span aria-hidden="true">↗</span></a>
     </Card>
   )
 
@@ -1730,9 +1827,17 @@ export default function App() {
         </div>
       ) : (
         <div key="acct-signin">
-          <div ref={gisRef} style={{ display: 'flex', justifyContent: 'center', colorScheme: 'light' }} />
+          <button
+            onClick={() => setSignInOpen(true)}
+            className="fr-press"
+            style={{
+              width: '100%', padding: '9px 12px', borderRadius: 10,
+              background: c.accent, border: 'none', color: '#fff',
+              fontSize: 13, fontWeight: 600, cursor: 'pointer',
+            }}
+          >Sign in to sync</button>
           <div style={{ ...mono, fontSize: 9.5, color: c.faint, marginTop: 8, lineHeight: 1.5 }}>
-            Sign in to sync across devices.
+            Optional — sync your tasks across devices.
           </div>
         </div>
       )}
@@ -2172,6 +2277,7 @@ export default function App() {
                     if (e.key === 'Enter' && v) {
                       setState(s => ({ ...s, tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: null, done: false, createdAt: Date.now() }] }))
                       setBasketInputs({ ...basketInputs, inbox: '' })
+                      maybeNudge()
                     }
                   }}
                   style={{
@@ -2402,6 +2508,7 @@ export default function App() {
                     if (e.key === 'Enter' && v) {
                       setState(s => ({ ...s, tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: b.id, done: false, createdAt: Date.now() }] }))
                       setBasketInputs({ ...basketInputs, [addKey]: '' })
+                      maybeNudge()
                     }
                   }}
                   style={{
@@ -2431,6 +2538,138 @@ export default function App() {
         >
           <span style={{ fontFamily: 'var(--sans)', fontSize: 13, color: c.text }}>{undoState.msg}</span>
           <Btn size="sm" variant="soft" onClick={runUndo}>Undo</Btn>
+        </div>
+      )}
+
+      {/* "Sign in to sync" nudge — gentle, throttled, dismissible. */}
+      {nudge && !auth && (
+        <div
+          className="fr-modal"
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed', left: 0, right: 0, bottom: 22, margin: '0 auto', width: 'fit-content', maxWidth: '92vw',
+            zIndex: 95, background: c.surface2, border: `1px solid ${c.line}`, borderRadius: 12,
+            boxShadow: 'var(--shadow-lift)', padding: '8px 8px 8px 16px',
+            display: 'flex', alignItems: 'center', gap: 12,
+          }}
+        >
+          <span style={{ fontFamily: 'var(--sans)', fontSize: 13, color: c.text }}>
+            Sign in to sync your tasks across devices.
+          </span>
+          <Btn size="sm" variant="primary" onClick={() => { dismissNudge(); setSignInOpen(true) }}>Sign in</Btn>
+          <button
+            onClick={dismissNudge}
+            aria-label="Dismiss"
+            className="fr-press"
+            style={{
+              width: 28, height: 28, borderRadius: 8, flexShrink: 0, padding: 0,
+              background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 16, lineHeight: 1,
+            }}
+          >×</button>
+        </div>
+      )}
+
+      {/* Sign-in modal — Google (optional) + email/password. */}
+      {signInOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Sign in"
+          onClick={closeSignIn}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+          }}
+        >
+          <div
+            className="fr-modal"
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 360, maxWidth: '100%', background: c.surface, border: `1px solid ${c.line}`,
+              borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+              <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>
+                {authMode === 'login' ? 'Log in' : 'Create account'}
+              </h2>
+              <button
+                onClick={closeSignIn}
+                aria-label="Close"
+                className="fr-press"
+                style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
+              >×</button>
+            </div>
+            <div style={{ ...mono, fontSize: 10, color: c.faint, marginBottom: 16 }}>
+              Sync your tasks across devices.
+            </div>
+
+            {GOOGLE_ON && (
+              <>
+                <div ref={gisRef} style={{ display: 'flex', justifyContent: 'center', colorScheme: 'light', marginBottom: 14 }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 14px' }}>
+                  <div style={{ flex: 1, height: 1, background: c.hair }} />
+                  <span style={{ ...mono, fontSize: 9.5, color: c.faint }}>OR</span>
+                  <div style={{ flex: 1, height: 1, background: c.hair }} />
+                </div>
+              </>
+            )}
+
+            <form onSubmit={e => { e.preventDefault(); submitEmailAuth() }}>
+              <input
+                className="fr-in"
+                type="email"
+                autoComplete="email"
+                placeholder="Email"
+                value={emailField}
+                onChange={e => setEmailField(e.target.value)}
+                style={{
+                  width: '100%', boxSizing: 'border-box', padding: '10px 12px', marginBottom: 10,
+                  borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
+                  fontFamily: 'var(--sans)', fontSize: 14,
+                }}
+              />
+              <input
+                className="fr-in"
+                type="password"
+                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                placeholder={authMode === 'login' ? 'Password' : 'Password (min 8 characters)'}
+                value={pwField}
+                onChange={e => setPwField(e.target.value)}
+                style={{
+                  width: '100%', boxSizing: 'border-box', padding: '10px 12px',
+                  borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
+                  fontFamily: 'var(--sans)', fontSize: 14,
+                }}
+              />
+              {authErr && (
+                <div style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{authErr}</div>
+              )}
+              <button
+                type="submit"
+                disabled={authBusy}
+                className="fr-btn"
+                style={{
+                  width: '100%', marginTop: 14, padding: '10px 12px', borderRadius: 10,
+                  background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600,
+                  cursor: authBusy ? 'default' : 'pointer', opacity: authBusy ? 0.65 : 1,
+                }}
+              >
+                {authBusy ? 'Please wait…' : authMode === 'login' ? 'Log in' : 'Create account'}
+              </button>
+            </form>
+
+            <div style={{ ...T.body, fontSize: 12.5, color: c.dim, marginTop: 14, textAlign: 'center' }}>
+              {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+              <button
+                onClick={() => { setAuthMode(m => (m === 'login' ? 'register' : 'login')); setAuthErr(null) }}
+                style={{ background: 'none', border: 'none', padding: 0, color: c.accent, fontWeight: 600, cursor: 'pointer', fontSize: 12.5 }}
+              >
+                {authMode === 'login' ? 'Create one' : 'Log in'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
