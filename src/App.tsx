@@ -118,12 +118,24 @@ const TIPS: [string, string, string][] = [
   ['Dual coding', 'pair words with visuals — a diagram sticks better than text alone', 'https://en.wikipedia.org/wiki/Dual-coding_theory'],
   ['Chunking', 'group small items into meaningful units to stretch working memory', 'https://en.wikipedia.org/wiki/Chunking_(psychology)'],
 ]
-// Free 24/7 streams from somafm.com (listener-supported, attribution in the
-// card footer). <audio> playback needs no CORS, so these work from localhost.
-const STATIONS = [
-  { name: 'Fluid',        tag: 'lofi',  genre: 'instrumental hiphop', url: 'https://ice1.somafm.com/fluid-128-mp3' },
-  { name: 'Groove Salad', tag: 'chill', genre: 'ambient downtempo',   url: 'https://ice1.somafm.com/groovesalad-128-mp3' },
-  { name: 'Drone Zone',   tag: 'drone', genre: 'deep ambient',        url: 'https://ice1.somafm.com/dronezone-128-mp3' },
+// Focus music — two source kinds coexist:
+//  - 'stream'  : SomaFM 24/7 Icecast MP3, played via the root <audio>. Survives
+//                tab switches, needs no CORS, but it's live radio you don't control.
+//  - 'youtube' : a looping YouTube video in a hidden <iframe>. Plays the exact
+//                track, but stops on in-app tab change (an iframe can't stay
+//                mounted like <audio>) and leans on the click gesture for autoplay.
+type Station = {
+  kind: 'stream' | 'youtube'
+  name: string; tag: string; genre: string
+  url?: string       // stream only
+  videoId?: string   // youtube only
+}
+const STATIONS: Station[] = [
+  { kind: 'youtube', name: 'Lofi study beats', tag: 'lofi',       genre: 'lofi hiphop',       videoId: 'X4VbdwhkE10' },
+  { kind: 'stream',  name: 'Groove Salad',     tag: 'chill',      genre: 'ambient downtempo', url: 'https://ice1.somafm.com/groovesalad-128-mp3' },
+  { kind: 'youtube', name: 'Lofi chill',       tag: 'lofi chill', genre: 'lofi chill',        videoId: 'hIH1joP9_FU' },
+  { kind: 'youtube', name: 'Alpha waves',      tag: 'alpha',      genre: 'focus / study',     videoId: 'GEgSBuYlSoA' },
+  { kind: 'stream',  name: 'Drone Zone',       tag: 'drone',      genre: 'deep ambient',      url: 'https://ice1.somafm.com/dronezone-128-mp3' },
 ]
 
 const ENERGIES: Energy[] = ['Low', 'Med', 'High']
@@ -890,12 +902,18 @@ export default function App() {
       .catch(() => setBtc({ err: true }))
   }, [])
 
-  /* ----- music: reload the stream on station switch ----- */
+  /* ----- music: reload the source on station switch ----- */
   useEffect(() => {
     const a = audioRef.current
     if (!a) return
-    a.load()
-    if (musicOn) a.play().catch(() => { setMusicErr(true); setMusicOn(false) })
+    if (STATIONS[station].kind === 'stream') {
+      // youtube → stream (or stream → stream): (re)connect and resume.
+      a.load()
+      if (musicOn) a.play().catch(() => { setMusicErr(true); setMusicOn(false) })
+    } else {
+      // stream → youtube: silence the audio; the iframe below carries playback.
+      a.pause()
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [station])
 
@@ -1405,14 +1423,17 @@ export default function App() {
   }
 
   const toggleMusic = () => {
-    const a = audioRef.current
-    if (!a) return
     setMusicErr(false)
     if (musicOn) {
-      a.pause()
+      audioRef.current?.pause()
       setMusicOn(false)
-    } else {
+    } else if (STATIONS[station].kind === 'stream') {
+      const a = audioRef.current
+      if (!a) return
       a.play().catch(() => { setMusicErr(true); setMusicOn(false) })
+      setMusicOn(true)
+    } else {
+      // youtube: mounting the autoplay iframe (root-level) starts playback.
       setMusicOn(true)
     }
   }
@@ -1573,7 +1594,7 @@ export default function App() {
             ...mono, fontSize: 9.5, color: musicErr ? c.down : c.faint, marginTop: 2,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}>
-            {musicErr ? 'stream unavailable — try again' : (musicOn ? 'now playing' : STATIONS[station].genre) + ' · somafm'}
+            {musicErr ? 'stream unavailable — try again' : (musicOn ? 'now playing' : STATIONS[station].genre) + ' · ' + (STATIONS[station].kind === 'stream' ? 'somafm' : 'youtube')}
           </div>
         </div>
         {musicOn && !musicErr && (
@@ -2000,10 +2021,23 @@ export default function App() {
       {/* Root-mounted so the stream keeps playing across tab switches. */}
       <audio
         ref={audioRef}
-        src={STATIONS[station].url}
+        src={STATIONS[station].kind === 'stream' ? STATIONS[station].url : undefined}
         preload="none"
-        onError={() => { if (musicOn) { setMusicErr(true); setMusicOn(false) } }}
+        onError={() => { if (musicOn && STATIONS[station].kind === 'stream') { setMusicErr(true); setMusicOn(false) } }}
       />
+      {/* YouTube stations play through a hidden, root-mounted iframe. Keyed on the
+          video id so switching stations remounts (and autoplays) the new track. */}
+      {musicOn && STATIONS[station].kind === 'youtube' && STATIONS[station].videoId && (
+        <iframe
+          key={STATIONS[station].videoId}
+          title={STATIONS[station].name}
+          src={`https://www.youtube-nocookie.com/embed/${STATIONS[station].videoId}?autoplay=1&modestbranding=1&rel=0&loop=1&playlist=${STATIONS[station].videoId}`}
+          allow="autoplay; encrypted-media"
+          loading="lazy"
+          style={{ border: 0, width: 0, height: 0, opacity: 0, position: 'absolute' }}
+          aria-hidden="true"
+        />
+      )}
       <main className="fr-content">
       <div style={{ maxWidth: 1120, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: SP.xl }}>
 
