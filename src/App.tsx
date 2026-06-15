@@ -43,7 +43,9 @@ type DayStats = {
   distracted: number
 }
 
-type Tweaks = { accent: string }
+// showMaintenance: the Maintenance lane is hidden from the Projects tab by
+// default (perpetual upkeep shouldn't tempt a click); a link reveals it.
+type Tweaks = { accent: string; showMaintenance?: boolean }
 
 type State = {
   tasks: Task[]
@@ -870,7 +872,10 @@ export default function App() {
           : { date: todayKey(), ids: [] }
         // Retired tweaks ('Split'/'Paired'/'Stacked' layouts) and the habit
         // tracker may linger in stored JSON — only known fields are picked up.
-        const tweaks = { accent: parsed.tweaks?.accent ?? DEFAULT_STATE.tweaks.accent }
+        const tweaks = {
+          accent: parsed.tweaks?.accent ?? DEFAULT_STATE.tweaks.accent,
+          showMaintenance: parsed.tweaks?.showMaintenance ?? false,
+        }
         setState(s => ({
           ...DEFAULT_STATE,
           tasks,
@@ -2556,78 +2561,114 @@ export default function App() {
           const completed = state.baskets.filter(b => b.completedAt).sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 880 }}>
-              {BASKET_STATUSES.map(lane => {
-                const projs = state.baskets.filter(b => b.status === lane.key && !b.completedAt)
-                const laneKey = 'newproj:' + lane.key
-                const ongoingFull = lane.key === 'ongoing' && ongoingCount >= ONGOING_CAP
-                // A full Ongoing lane rejects drops (unless the card is already ongoing).
-                const accepts = !!dragId && !(ongoingFull && dragged?.status !== 'ongoing')
-                return (
-                  <section key={lane.key}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 11 }}>
-                      <span style={{ ...T.kicker, fontSize: 10.5, color: lane.key === 'ongoing' ? c.accent : c.dim }}>{lane.label}</span>
-                      <span style={{ ...mono, fontSize: 10.5, color: c.faint }}>
-                        {lane.key === 'ongoing' ? `${ongoingCount}/${ONGOING_CAP}` : projs.length}
-                      </span>
-                    </div>
-                    <div
-                      onDragOver={(e) => { if (accepts) { e.preventDefault(); if (overLane !== lane.key) setOverLane(lane.key) } }}
-                      onDrop={(e) => { e.preventDefault(); if (accepts && dragId) setBasketStatus(dragId, lane.key); setDragId(null); setOverLane(null) }}
-                      style={{
-                        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(224px, 1fr))', gap: 10,
-                        borderRadius: 12, padding: 5, margin: -5,
-                        outline: accepts && overLane === lane.key ? `2px dashed ${c.accentLine}` : '2px dashed transparent',
-                        background: accepts && overLane === lane.key ? c.accentSoft : 'transparent',
-                        transition: 'background .15s ease, outline-color .15s ease',
-                      }}
-                    >
-                      {projs.map(b => {
-                        const open = state.tasks.filter(t => t.basketId === b.id && !t.done).length
-                        const total = state.tasks.filter(t => t.basketId === b.id).length
-                        return (
+              {(() => {
+                const showMaint = state.tweaks.showMaintenance ?? false
+                const maintCount = state.baskets.filter(b => b.status === 'maintenance' && !b.completedAt).length
+                const renderLane = (lane: { key: BasketStatus; label: string }) => {
+                  const projs = state.baskets.filter(b => b.status === lane.key && !b.completedAt)
+                  const laneKey = 'newproj:' + lane.key
+                  const ongoingFull = lane.key === 'ongoing' && ongoingCount >= ONGOING_CAP
+                  // A full Ongoing lane rejects drops (unless the card is already ongoing).
+                  const accepts = !!dragId && !(ongoingFull && dragged?.status !== 'ongoing')
+                  return (
+                    <section key={lane.key}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 11 }}>
+                        <span style={{ ...T.kicker, fontSize: 10.5, color: lane.key === 'ongoing' ? c.accent : c.dim }}>{lane.label}</span>
+                        <span style={{ ...mono, fontSize: 10.5, color: c.faint }}>
+                          {lane.key === 'ongoing' ? `${ongoingCount}/${ONGOING_CAP}` : projs.length}
+                        </span>
+                        {lane.key === 'maintenance' && (
                           <button
-                            key={b.id}
-                            className="fr-row"
-                            draggable
-                            onDragStart={(e) => { setDragId(b.id); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', b.id) } catch { /* ignore */ } }}
-                            onDragEnd={() => { setDragId(null); setOverLane(null) }}
-                            onClick={() => setSelectedId(b.id)}
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
-                              background: c.surface2, border: `1px solid ${dragId === b.id ? c.accentLine : c.hair}`, borderRadius: 12,
-                              padding: '13px 14px', cursor: 'grab', minWidth: 0,
-                              opacity: dragId === b.id ? 0.4 : 1,
-                            }}
+                            onClick={() => setState(s => ({ ...s, tweaks: { ...s.tweaks, showMaintenance: false } }))}
+                            style={{ ...mono, fontSize: 10.5, color: c.faint, marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
                           >
-                            <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: b.color, flexShrink: 0 }} />
-                            <span style={{ ...T.bodyStrong, color: c.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
-                            <span style={{ ...mono, fontSize: 10.5, color: c.faint, flexShrink: 0 }}>{open}/{total}</span>
-                            <span aria-hidden="true" style={{ color: c.faint, fontSize: 14, flexShrink: 0 }}>›</span>
+                            hide
                           </button>
-                        )
-                      })}
-                      <input
-                        className="fr-in"
-                        aria-label={`New ${lane.label} project`}
-                        placeholder={ongoingFull ? 'Ongoing is full (2/2)' : '+ new project…'}
-                        disabled={ongoingFull}
-                        value={basketInputs[laneKey] ?? ''}
-                        onChange={(e) => setBasketInputs({ ...basketInputs, [laneKey]: e.target.value })}
-                        onKeyDown={(e) => {
-                          const v = (basketInputs[laneKey] ?? '').trim()
-                          if (e.key === 'Enter' && v) { createBasket(v, lane.key); setBasketInputs({ ...basketInputs, [laneKey]: '' }) }
-                        }}
+                        )}
+                      </div>
+                      <div
+                        onDragOver={(e) => { if (accepts) { e.preventDefault(); if (overLane !== lane.key) setOverLane(lane.key) } }}
+                        onDrop={(e) => { e.preventDefault(); if (accepts && dragId) setBasketStatus(dragId, lane.key); setDragId(null); setOverLane(null) }}
                         style={{
-                          fontFamily: 'var(--sans)', fontSize: 13, minWidth: 0,
-                          border: `1px dashed ${c.line}`, borderRadius: 12,
-                          padding: '13px 14px', outline: 'none', background: 'transparent',
-                          color: c.text, opacity: ongoingFull ? 0.5 : 1,
+                          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(224px, 1fr))', gap: 10,
+                          borderRadius: 12, padding: 5, margin: -5,
+                          outline: accepts && overLane === lane.key ? `2px dashed ${c.accentLine}` : '2px dashed transparent',
+                          background: accepts && overLane === lane.key ? c.accentSoft : 'transparent',
+                          transition: 'background .15s ease, outline-color .15s ease',
                         }}
-                      />
-                    </div>
-                  </section>
+                      >
+                        {projs.map(b => {
+                          const open = state.tasks.filter(t => t.basketId === b.id && !t.done).length
+                          const total = state.tasks.filter(t => t.basketId === b.id).length
+                          return (
+                            <button
+                              key={b.id}
+                              className="fr-row"
+                              draggable
+                              onDragStart={(e) => { setDragId(b.id); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', b.id) } catch { /* ignore */ } }}
+                              onDragEnd={() => { setDragId(null); setOverLane(null) }}
+                              onClick={() => setSelectedId(b.id)}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 10, textAlign: 'left',
+                                background: c.surface2, border: `1px solid ${dragId === b.id ? c.accentLine : c.hair}`, borderRadius: 12,
+                                padding: '13px 14px', cursor: 'grab', minWidth: 0,
+                                opacity: dragId === b.id ? 0.4 : 1,
+                              }}
+                            >
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: b.color, flexShrink: 0 }} />
+                              <span style={{ ...T.bodyStrong, color: c.text, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
+                              <span style={{ ...mono, fontSize: 10.5, color: c.faint, flexShrink: 0 }}>{open}/{total}</span>
+                              <span aria-hidden="true" style={{ color: c.faint, fontSize: 14, flexShrink: 0 }}>›</span>
+                            </button>
+                          )
+                        })}
+                        <input
+                          className="fr-in"
+                          aria-label={`New ${lane.label} project`}
+                          placeholder={ongoingFull ? 'Ongoing is full (2/2)' : '+ new project…'}
+                          disabled={ongoingFull}
+                          value={basketInputs[laneKey] ?? ''}
+                          onChange={(e) => setBasketInputs({ ...basketInputs, [laneKey]: e.target.value })}
+                          onKeyDown={(e) => {
+                            const v = (basketInputs[laneKey] ?? '').trim()
+                            if (e.key === 'Enter' && v) { createBasket(v, lane.key); setBasketInputs({ ...basketInputs, [laneKey]: '' }) }
+                          }}
+                          style={{
+                            fontFamily: 'var(--sans)', fontSize: 13, minWidth: 0,
+                            border: `1px dashed ${c.line}`, borderRadius: 12,
+                            padding: '13px 14px', outline: 'none', background: 'transparent',
+                            color: c.text, opacity: ongoingFull ? 0.5 : 1,
+                          }}
+                        />
+                      </div>
+                    </section>
+                  )
+                }
+                // Maintenance is hidden by default and rendered last (out of the
+                // prime second slot) only when the user reveals it via the link.
+                return (
+                  <>
+                    {BASKET_STATUSES.filter(l => l.key !== 'maintenance').map(renderLane)}
+                    {showMaint
+                      ? renderLane(BASKET_STATUSES.find(l => l.key === 'maintenance')!)
+                      : (
+                        <button
+                          onClick={() => setState(s => ({ ...s, tweaks: { ...s.tweaks, showMaintenance: true } }))}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 7, alignSelf: 'flex-start',
+                            background: 'none', border: 'none', padding: '2px 0', cursor: 'pointer',
+                            color: c.faint, fontSize: 12,
+                          }}
+                        >
+                          <span aria-hidden="true" style={{ fontSize: 13, lineHeight: 1 }}>›</span>
+                          <span style={{ borderBottom: `1px dashed ${c.line}`, paddingBottom: 1 }}>
+                            Show maintenance{maintCount > 0 ? ` (${maintCount})` : ''}
+                          </span>
+                        </button>
+                      )}
+                  </>
                 )
-              })}
+              })()}
 
               {/* ---------- Completed shelf (archive; reopenable) ---------- */}
               {completed.length > 0 && (
