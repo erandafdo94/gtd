@@ -69,6 +69,31 @@ type TimerState = {
   endsAt: number | null
 }
 
+// Sidebar sections. `habits` is the structured habit tracker (server-backed,
+// separate from the local-first State blob).
+type View = 'dashboard' | 'inbox' | 'projects' | 'settings' | 'habits'
+
+// A habit + its server-computed stats. Daily habits track a consecutive-day
+// streak; Weekly habits target N check-ins per ISO week. The stat fields
+// (doneToday … weekDates) are computed by the backend at read time.
+type HabitKind = 'Daily' | 'Weekly'
+type Habit = {
+  id: string
+  name: string
+  kind: HabitKind
+  targetCount: number
+  color?: string | null
+  icon?: string | null
+  sortOrder: number
+  archived: boolean
+  doneToday: boolean
+  currentStreak: number
+  longestStreak: number
+  thisWeekCount: number
+  weekDates: string[]
+  recentDates: string[]
+}
+
 /* =====================================================================
    PALETTE + TYPE RAMP
    ===================================================================== */
@@ -447,6 +472,231 @@ function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
 }
 
 /* =====================================================================
+   HABITS — small presentational pieces (Apple Reminders-style)
+   ===================================================================== */
+// Daily check-off: a fillable ring that turns into a coloured ✓ when done.
+function CheckCircle({ done, color, onClick }: { done: boolean; color: string; onClick: () => void }) {
+  return (
+    <button
+      className="fr-press"
+      aria-pressed={done}
+      aria-label={done ? 'Mark not done' : 'Mark done'}
+      onClick={onClick}
+      style={{
+        width: 26, height: 26, borderRadius: '50%', flexShrink: 0, padding: 0, cursor: 'pointer',
+        border: done ? 'none' : `2px solid ${c.line}`, background: done ? color : 'transparent',
+        display: 'grid', placeItems: 'center', transition: 'background .15s ease, border-color .15s ease',
+      }}
+    >
+      {done && <span aria-hidden="true" style={{ color: '#fff', fontSize: 14, lineHeight: 1 }}>✓</span>}
+    </button>
+  )
+}
+
+// Weekly progress: an Activity-style ring with the count in the middle. Tapping
+// it toggles today's check-in (same primary action as the daily circle).
+function WeekRing({ count, target, color, onClick }: { count: number; target: number; color: string; onClick: () => void }) {
+  const r = 11
+  const circ = 2 * Math.PI * r
+  const pct = Math.max(0, Math.min(1, target > 0 ? count / target : 0))
+  return (
+    <button
+      className="fr-press"
+      aria-label={`${count} of ${target} this week — tap to check in today`}
+      onClick={onClick}
+      style={{ width: 30, height: 30, flexShrink: 0, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer', position: 'relative' }}
+    >
+      <svg width="30" height="30" viewBox="0 0 30 30" style={{ transform: 'rotate(-90deg)' }} aria-hidden="true">
+        <circle cx="15" cy="15" r={r} fill="none" stroke={c.surface3} strokeWidth="3" />
+        <circle
+          cx="15" cy="15" r={r} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round"
+          strokeDasharray={circ} strokeDashoffset={circ * (1 - pct)}
+          style={{ transition: 'stroke-dashoffset .25s ease' }}
+        />
+      </svg>
+      <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', ...mono, fontSize: 9, color: c.dim, fontWeight: 700 }}>{count}</span>
+    </button>
+  )
+}
+
+// Last-7-days strip shown on every habit row: today + the previous six days as
+// tappable checkboxes (no future days exist in this window). Lets you mark
+// yesterday — or any of the last week — without leaving the list. Done days fill
+// with the habit colour + a check; today's empty cell is outlined in that colour.
+function DayStrip({ recentDates, color, onToggle }: {
+  recentDates: string[]; color: string; onToggle: (date: string, done: boolean) => void
+}) {
+  const now = new Date()
+  const done = new Set(recentDates)
+  const WD = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
+  const days: { key: string; label: string; isToday: boolean }[] = []
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now); d.setDate(now.getDate() - i)
+    days.push({ key: dateKey(d), label: WD[d.getDay()], isToday: i === 0 })
+  }
+  return (
+    <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
+      {days.map(dd => {
+        const on = done.has(dd.key)
+        return (
+          <span key={dd.key} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+            <button
+              className="fr-press"
+              onClick={() => onToggle(dd.key, on)}
+              title={dd.isToday ? `${dd.key} (today)` : dd.key}
+              aria-label={`${dd.key}${on ? ' done' : ''}${dd.isToday ? ' (today)' : ''}`}
+              style={{
+                width: 18, height: 18, borderRadius: '50%', padding: 0, cursor: 'pointer',
+                background: on ? color : 'transparent',
+                border: on ? 'none' : `1.5px solid ${dd.isToday ? color : c.line}`,
+                display: 'grid', placeItems: 'center',
+              }}
+            >
+              {on && <span aria-hidden="true" style={{ color: '#fff', fontSize: 10, lineHeight: 1 }}>✓</span>}
+            </button>
+            <span style={{ ...mono, fontSize: 8, color: dd.isToday ? c.text2 : c.faint }}>{dd.label}</span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+function HabitGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ ...T.kicker, fontSize: 9.5, color: c.faint, margin: '6px 2px 8px' }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{children}</div>
+    </div>
+  )
+}
+
+// Parse a YYYY-MM-DD as a LOCAL date (new Date('2026-06-15') would parse as UTC
+// and can shift the day depending on timezone).
+function parseDateKey(s: string): Date {
+  const [y, m, d] = s.split('-').map(Number)
+  return new Date(y, m - 1, d)
+}
+
+// The local YYYY-MM-DD keys in the ISO week containing today (for optimistic
+// updates of weekly progress when a date in this week is toggled).
+function currentWeekKeys(): Set<string> {
+  const now = new Date()
+  const monday = new Date(now)
+  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7))
+  const s = new Set<string>()
+  for (let i = 0; i < 7; i++) { const d = new Date(monday); d.setDate(monday.getDate() + i); s.add(dateKey(d)) }
+  return s
+}
+
+// The local YYYY-MM-DD keys for the last 7 days (today + previous 6).
+function last7Keys(): Set<string> {
+  const now = new Date()
+  const s = new Set<string>()
+  for (let i = 0; i < 7; i++) { const d = new Date(now); d.setDate(now.getDate() - i); s.add(dateKey(d)) }
+  return s
+}
+
+function StatChip({ value, label }: { value: string; label: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 14px', background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 10, minWidth: 60 }}>
+      <span style={{ ...mono, fontSize: 16, fontWeight: 700, color: c.text, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
+      <span style={{ ...T.kicker, fontSize: 8.5, color: c.faint }}>{label}</span>
+    </div>
+  )
+}
+
+// GitHub-style heatmap of every check-in. Columns = ISO weeks (Mon→Sun), from the
+// earlier of one-year-ago / the first check-in up to this week. Each cell is
+// tappable to add/remove a check-in for that day (future days are disabled), which
+// is also how past days get marked retroactively.
+function HabitHeatmap({ dates, color, onToggle }: { dates: string[]; color: string; onToggle: (date: string, done: boolean) => void }) {
+  // Open scrolled to the most recent week (right edge), like GitHub's graph.
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => { const el = scrollRef.current; if (el) el.scrollLeft = el.scrollWidth }, [dates.length])
+  // Immediate, styled hover/focus tooltip with a friendly date (the native title
+  // tooltip is slow and easy to miss).
+  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null)
+  const fmtDay = (key: string) => parseDateKey(key).toLocaleDateString('en', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+  const showTip = (el: HTMLElement, key: string, on: boolean) => {
+    const r = el.getBoundingClientRect()
+    setTip({ text: fmtDay(key) + (on ? ' · done' : ''), x: r.left + r.width / 2, y: r.top })
+  }
+  const done = new Set(dates)
+  const todayStr = todayKey()
+  const now = new Date()
+  const end = new Date(now); end.setDate(now.getDate() + (6 - ((now.getDay() + 6) % 7))) // Sunday this week
+  let start = new Date(now); start.setFullYear(now.getFullYear() - 1)
+  if (dates.length) { const first = parseDateKey(dates[0]); if (first < start) start = first }
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7)) // back to Monday
+
+  const weeks: { key: string; date: Date }[][] = []
+  const cur = new Date(start)
+  while (cur <= end) {
+    const wk: { key: string; date: Date }[] = []
+    for (let i = 0; i < 7; i++) { wk.push({ key: dateKey(cur), date: new Date(cur) }); cur.setDate(cur.getDate() + 1) }
+    weeks.push(wk)
+  }
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  const cell = 13, gap = 3
+  return (
+    <>
+    <div ref={scrollRef} style={{ overflowX: 'auto', paddingBottom: 6 }}>
+      <div style={{ display: 'flex', gap, marginBottom: 4 }}>
+        {weeks.map((wk, i) => {
+          const first = wk[0].date
+          const prev = i > 0 ? weeks[i - 1][0].date : null
+          const show = !prev || prev.getMonth() !== first.getMonth()
+          return <div key={i} style={{ width: cell, ...mono, fontSize: 8, color: c.faint, flexShrink: 0 }}>{show ? MONTHS[first.getMonth()] : ''}</div>
+        })}
+      </div>
+      <div style={{ display: 'flex', gap }}>
+        {weeks.map((wk, i) => (
+          <div key={i} style={{ display: 'flex', flexDirection: 'column', gap, flexShrink: 0 }}>
+            {wk.map(d => {
+              const on = done.has(d.key)
+              const future = d.key > todayStr
+              return (
+                <button
+                  key={d.key}
+                  className="fr-press"
+                  disabled={future}
+                  aria-label={`${d.key}${on ? ' — done' : ''}`}
+                  onClick={() => onToggle(d.key, on)}
+                  onMouseEnter={(e) => showTip(e.currentTarget, d.key, on)}
+                  onMouseLeave={() => setTip(null)}
+                  onFocus={(e) => showTip(e.currentTarget, d.key, on)}
+                  onBlur={() => setTip(null)}
+                  style={{
+                    width: cell, height: cell, borderRadius: 3, padding: 0, border: 'none',
+                    background: future ? 'transparent' : on ? color : c.surface3,
+                    opacity: future ? 0.25 : 1, cursor: future ? 'default' : 'pointer',
+                  }}
+                />
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+    {tip && (
+      <div
+        role="tooltip"
+        style={{
+          position: 'fixed', left: tip.x, top: tip.y, transform: 'translate(-50%, calc(-100% - 8px))',
+          zIndex: 200, pointerEvents: 'none', background: c.surface3, border: `1px solid ${c.line}`,
+          borderRadius: 8, padding: '5px 9px', ...mono, fontSize: 10.5, color: c.text,
+          whiteSpace: 'nowrap', boxShadow: 'var(--shadow-lift)',
+        }}
+      >
+        {tip.text}
+      </div>
+    )}
+    </>
+  )
+}
+
+/* =====================================================================
    TIMER RING
    ===================================================================== */
 function TimerRing({
@@ -703,14 +953,15 @@ function InlineEdit({ value, onCommit, onCancel, style }: {
    SIDE NAV
    ===================================================================== */
 function SideNav({
-  view, onView, open, onClose, inboxCount, projectCount, footer,
+  view, onView, open, onClose, inboxCount, projectCount, habitCount, footer,
 }: {
-  view: 'dashboard' | 'inbox' | 'projects' | 'settings'
-  onView: (v: 'dashboard' | 'inbox' | 'projects' | 'settings') => void
+  view: View
+  onView: (v: View) => void
   open: boolean
   onClose: () => void
   inboxCount: number
   projectCount: number
+  habitCount: number
   /** Rendered pinned to the bottom of the sidebar (account / sync). */
   footer?: ReactNode
 }) {
@@ -726,7 +977,7 @@ function SideNav({
   const countStyle: CSSProperties = {
     ...mono, fontSize: 10.5, color: c.faint, fontVariantNumeric: 'tabular-nums', flexShrink: 0,
   }
-  const navItem = (key: 'dashboard' | 'inbox' | 'projects' | 'settings', glyph: string, label: string, count?: number): ReactNode => {
+  const navItem = (key: View, glyph: string, label: string, count?: number): ReactNode => {
     const active = view === key
     return (
       <button
@@ -755,6 +1006,7 @@ function SideNav({
         {navItem('dashboard', '◎', 'Dashboard')}
         {navItem('inbox', '▣', 'Inbox', inboxCount)}
         {navItem('projects', '▦', 'Projects', projectCount)}
+        {navItem('habits', '◉', 'Habits', habitCount)}
       </nav>
       {footer}
     </aside>
@@ -767,10 +1019,28 @@ function SideNav({
 export default function App() {
   const [state, setState] = useState<State>(DEFAULT_STATE)
   const [loaded, setLoaded] = useState(false)
-  const [view, setView] = useState<'dashboard' | 'inbox' | 'projects' | 'settings'>('dashboard')
+  const [view, setView] = useState<View>('dashboard')
   const [customize, setCustomize] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [statsOpen, setStatsOpen] = useState(false)
+
+  // Habit tracker (server-backed; deliberately kept out of the State blob so it
+  // isn't double-synced through /api/state).
+  const [habits, setHabits] = useState<Habit[]>([])
+  const [habitsLoading, setHabitsLoading] = useState(false)
+  const [habitsErr, setHabitsErr] = useState(false)
+  const [renamingHabitId, setRenamingHabitId] = useState<string | null>(null)
+  // New-habit modal form.
+  const [newHabitOpen, setNewHabitOpen] = useState(false)
+  const [nhName, setNhName] = useState('')
+  const [nhKind, setNhKind] = useState<HabitKind>('Daily')
+  const [nhTarget, setNhTarget] = useState(3)
+  const [nhColor, setNhColor] = useState(PROJECT_COLORS[0])
+  const [nhBusy, setNhBusy] = useState(false)
+  // Habit history modal (calendar heatmap + retroactive marking).
+  const [historyHabitId, setHistoryHabitId] = useState<string | null>(null)
+  const [historyDates, setHistoryDates] = useState<string[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
 
   // auth / sync (optional)
   const [auth, setAuth] = useState<AuthState | null>(null)
@@ -1134,6 +1404,163 @@ export default function App() {
     }, 900)
     return () => clearTimeout(t)
   }, [state, auth, loaded])
+
+  /* ----- habits: load + optimistic mutations (structured /api/habits API) ----- */
+  const loadHabits = async () => {
+    if (!auth || !SYNC_ON) return
+    setHabitsLoading(true)
+    try {
+      const r = await authedFetch(`/api/habits?today=${todayKey()}`)
+      if (r && r.ok) { setHabits(await r.json() as Habit[]); setHabitsErr(false) }
+      else if (r) setHabitsErr(true)
+    } catch { setHabitsErr(true) }
+    finally { setHabitsLoading(false) }
+  }
+
+  // Fetch habits when the tab is opened (and once auth becomes available).
+  useEffect(() => {
+    if (view === 'habits' && auth && SYNC_ON) loadHabits()
+  }, [view, auth])
+
+  const createHabit = async (input: { name: string; kind: HabitKind; targetCount: number; color?: string }) => {
+    const r = await authedFetch(`/api/habits?today=${todayKey()}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    if (r && r.ok) { const h = await r.json() as Habit; setHabits(hs => [...hs, h]); setHabitsErr(false) }
+    else setHabitsErr(true)
+  }
+
+  const updateHabit = async (
+    id: string,
+    patch: Partial<Pick<Habit, 'name' | 'kind' | 'targetCount' | 'color' | 'icon' | 'sortOrder' | 'archived'>>,
+  ) => {
+    setHabits(hs => hs.map(h => (h.id === id ? { ...h, ...patch } : h)))   // optimistic
+    const r = await authedFetch(`/api/habits/${id}?today=${todayKey()}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (r && r.ok) { const h = await r.json() as Habit; setHabits(hs => hs.map(x => (x.id === id ? h : x))) }
+    else { setHabitsErr(true); loadHabits() }
+  }
+
+  const deleteHabit = async (id: string) => {
+    const prev = habits
+    setHabits(hs => hs.filter(h => h.id !== id))   // optimistic
+    const r = await authedFetch(`/api/habits/${id}`, { method: 'DELETE' })
+    if (!r || !r.ok) { setHabits(prev); setHabitsErr(true) }
+  }
+
+  const openHistory = async (h: Habit) => {
+    setHistoryHabitId(h.id)
+    setHistoryDates([])
+    setHistoryLoading(true)
+    try {
+      const r = await authedFetch(`/api/habits/${h.id}/history`)
+      if (r && r.ok) { const d = await r.json() as { dates: string[] }; setHistoryDates(d.dates) }
+      else if (r) setHabitsErr(true)
+    } catch { setHabitsErr(true) }
+    finally { setHistoryLoading(false) }
+  }
+
+  // Toggle a check-in for an arbitrary date (today or retroactive). Optimistically
+  // updates the row's week strip / weekly count and the open heatmap, then
+  // reconciles streaks from the server's recomputed HabitDto.
+  const toggleDate = async (h: Habit, date: string, currentlyDone: boolean) => {
+    const on = !currentlyDone
+    const today = todayKey()
+    const wk = currentWeekKeys()
+    const recent = last7Keys()
+    const toggleIn = (arr: string[]) => (on ? [...arr.filter(d => d !== date), date].sort() : arr.filter(d => d !== date))
+    setHabits(hs => hs.map(x => (x.id === h.id ? {
+      ...x,
+      doneToday: date === today ? on : x.doneToday,
+      weekDates: wk.has(date) ? toggleIn(x.weekDates) : x.weekDates,
+      thisWeekCount: wk.has(date) ? Math.max(0, x.thisWeekCount + (on ? 1 : -1)) : x.thisWeekCount,
+      recentDates: recent.has(date) ? toggleIn(x.recentDates) : x.recentDates,
+    } : x)))
+    if (historyHabitId === h.id) {
+      setHistoryDates(ds => (on ? [...ds.filter(d => d !== date), date].sort() : ds.filter(d => d !== date)))
+    }
+    const r = on
+      ? await authedFetch(`/api/habits/${h.id}/checkins?today=${today}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date }),
+        })
+      : await authedFetch(`/api/habits/${h.id}/checkins/${date}?today=${today}`, { method: 'DELETE' })
+    if (r && r.ok) { const updated = await r.json() as Habit; setHabits(hs => hs.map(x => (x.id === h.id ? updated : x))) }
+    else { setHabitsErr(true); loadHabits() }
+  }
+
+  const toggleToday = (h: Habit) => toggleDate(h, todayKey(), h.doneToday)
+
+  const submitNewHabit = async () => {
+    const name = nhName.trim()
+    if (!name) return
+    setNhBusy(true)
+    await createHabit({ name, kind: nhKind, targetCount: nhKind === 'Weekly' ? nhTarget : 1, color: nhColor })
+    setNhBusy(false)
+    setNewHabitOpen(false)
+    setNhName(''); setNhKind('Daily'); setNhTarget(3); setNhColor(PROJECT_COLORS[0])
+  }
+
+  // One habit row — Reminders-style: check circle / progress ring, name, streak,
+  // a Mon–Sun strip for daily habits, and a ⋯ menu (rename / target / colour / delete).
+  const habitRow = (h: Habit) => {
+    const color = h.color || c.accent
+    const weekly = h.kind === 'Weekly'
+    const subtitle = weekly
+      ? `${h.thisWeekCount} of ${h.targetCount} this week${h.currentStreak > 0 ? ` · 🔥 ${h.currentStreak} wk${h.currentStreak === 1 ? '' : 's'}` : ''}`
+      : h.currentStreak > 0
+        ? `🔥 ${h.currentStreak} day${h.currentStreak === 1 ? '' : 's'}${h.longestStreak > h.currentStreak ? ` · best ${h.longestStreak}` : ''}`
+        : 'not started'
+    const entries: MenuEntry[] = [
+      { kind: 'item', label: 'View history', onClick: () => openHistory(h) },
+      { kind: 'item', label: 'Rename', onClick: () => setRenamingHabitId(h.id) },
+    ]
+    if (weekly) {
+      entries.push({ kind: 'item', label: 'Fewer per week', disabled: h.targetCount <= 1, onClick: () => updateHabit(h.id, { targetCount: Math.max(1, h.targetCount - 1) }) })
+      entries.push({ kind: 'item', label: 'More per week', disabled: h.targetCount >= 7, onClick: () => updateHabit(h.id, { targetCount: Math.min(7, h.targetCount + 1) }) })
+    }
+    entries.push({ kind: 'colors', value: color, onPick: (hex) => updateHabit(h.id, { color: hex }) })
+    entries.push({ kind: 'divider' })
+    entries.push({ kind: 'item', label: 'Delete', danger: true, onClick: () => deleteHabit(h.id) })
+    return (
+      <div key={h.id} style={{
+        display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px',
+        border: `1px solid ${c.hair}`, borderRadius: 12, background: c.surface2,
+      }}>
+        {weekly
+          ? <WeekRing count={h.thisWeekCount} target={h.targetCount} color={color} onClick={() => toggleToday(h)} />
+          : <CheckCircle done={h.doneToday} color={color} onClick={() => toggleToday(h)} />}
+        <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, flexShrink: 0 }} />
+        {renamingHabitId === h.id ? (
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <InlineEdit
+              value={h.name}
+              style={{ fontSize: 15, width: '100%', boxSizing: 'border-box' }}
+              onCommit={(v) => { const t = v.trim(); if (t && t !== h.name) updateHabit(h.id, { name: t }); setRenamingHabitId(null) }}
+              onCancel={() => setRenamingHabitId(null)}
+            />
+            <span style={{ display: 'block', ...mono, fontSize: 10, color: c.faint, marginTop: 2 }}>{subtitle}</span>
+          </span>
+        ) : (
+          <button
+            className="fr-press"
+            onClick={() => openHistory(h)}
+            aria-label={`View history for ${h.name}`}
+            style={{ flex: 1, minWidth: 0, textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+          >
+            <span style={{ display: 'block', ...T.taskTitle, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {h.icon ? `${h.icon} ` : ''}{h.name}
+            </span>
+            <span style={{ display: 'block', ...mono, fontSize: 10, color: c.faint, marginTop: 2 }}>{subtitle}</span>
+          </button>
+        )}
+        <DayStrip recentDates={h.recentDates} color={color} onToggle={(d, done) => toggleDate(h, d, done)} />
+        <MenuButton ariaLabel={`Options for ${h.name}`} entries={entries} />
+      </div>
+    )
+  }
 
   /* ----- auth: render the Google button into the sign-in modal ----- */
   useEffect(() => {
@@ -2016,6 +2443,7 @@ export default function App() {
         onClose={() => setSidebarOpen(false)}
         inboxCount={inbox.filter(t => !t.done).length}
         projectCount={state.baskets.filter(b => !b.completedAt).length}
+        habitCount={habits.filter(h => !h.archived && !h.doneToday).length}
         footer={accountSection}
       />
       <div
@@ -2069,7 +2497,7 @@ export default function App() {
         {/* ---------- header: page title + date ---------- */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
-            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : view === 'settings' ? 'Settings' : 'Projects'}
+            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : view === 'settings' ? 'Settings' : view === 'habits' ? 'Habits' : 'Projects'}
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button
@@ -2376,6 +2804,55 @@ export default function App() {
                   }}
                 />
               </div>
+            </Card>
+          )
+        })()}
+
+        {/* ================= HABITS ================= */}
+        {view === 'habits' && (() => {
+          // Habits are server-backed, so the tab needs sync + sign-in.
+          if (!SYNC_ON) return (
+            <Card style={{ maxWidth: 620 }}>
+              <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.6 }}>
+                Habits sync to your account, but sync isn’t configured for this build.
+              </div>
+            </Card>
+          )
+          if (!auth) return (
+            <Card style={{ maxWidth: 620 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: c.text, marginBottom: 4 }}>Track your habits</div>
+                  <div style={{ ...T.body, fontSize: 13, color: c.dim }}>
+                    Sign in to create daily and weekly habits and keep your streaks synced across devices.
+                  </div>
+                </div>
+                <Btn variant="primary" onClick={() => setSignInOpen(true)}>Sign in</Btn>
+              </div>
+            </Card>
+          )
+          const active = habits.filter(h => !h.archived)
+          const daily = active.filter(h => h.kind === 'Daily')
+          const weekly = active.filter(h => h.kind === 'Weekly')
+          const doneCount = active.filter(h => h.doneToday).length
+          return (
+            <Card style={{ minWidth: 0, maxWidth: 760 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 15, minHeight: 30 }}>
+                <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Habits</span>
+                <span style={{ ...mono, fontSize: 11, color: c.faint }}>
+                  {active.length === 0 ? 'none yet' : `${doneCount}/${active.length} done today`}
+                </span>
+                <span style={{ flex: 1 }} />
+                {habitsErr && <span style={{ ...mono, fontSize: 10, color: c.down }}>sync error</span>}
+                <Btn size="sm" variant="primary" onClick={() => setNewHabitOpen(true)}>+ New habit</Btn>
+              </div>
+              {active.length === 0 && !habitsLoading && (
+                <div style={{ ...mono, fontSize: 11, color: c.faint, marginBottom: 8 }}>
+                  No habits yet. Add a daily habit (like “Meditate”) or a weekly target (like “Work out 3×/week”).
+                </div>
+              )}
+              {daily.length > 0 && <HabitGroup title="Daily">{daily.map(h => habitRow(h))}</HabitGroup>}
+              {weekly.length > 0 && <HabitGroup title="Weekly">{weekly.map(h => habitRow(h))}</HabitGroup>}
             </Card>
           )
         })()}
@@ -2971,6 +3448,113 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ---------- New habit modal ---------- */}
+      {newHabitOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="New habit"
+          onClick={() => setNewHabitOpen(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+        >
+          <div
+            className="fr-modal"
+            onClick={e => e.stopPropagation()}
+            style={{ width: 360, maxWidth: '100%', background: c.surface, border: `1px solid ${c.line}`, borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22 }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>New habit</h2>
+              <button onClick={() => setNewHabitOpen(false)} aria-label="Close" className="fr-press" style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+            </div>
+            <form onSubmit={e => { e.preventDefault(); submitNewHabit() }}>
+              <input
+                className="fr-in"
+                autoFocus
+                placeholder="Habit name"
+                value={nhName}
+                onChange={e => setNhName(e.target.value)}
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', marginBottom: 14, borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text, fontFamily: 'var(--sans)', fontSize: 14 }}
+              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Type</span>
+                <Segmented options={['Daily', 'Weekly'] as const} value={nhKind} onChange={setNhKind} />
+              </div>
+              {nhKind === 'Weekly' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                  <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Times / week</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <button type="button" className="fr-press" aria-label="Fewer per week" onClick={() => setNhTarget(t => Math.max(1, t - 1))} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${c.line}`, background: c.surface2, color: c.text, fontSize: 16, lineHeight: 1, padding: 0, cursor: 'pointer' }}>−</button>
+                    <span style={{ ...mono, fontSize: 15, fontWeight: 700, color: c.text, minWidth: 14, textAlign: 'center' }}>{nhTarget}</span>
+                    <button type="button" className="fr-press" aria-label="More per week" onClick={() => setNhTarget(t => Math.min(7, t + 1))} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${c.line}`, background: c.surface2, color: c.text, fontSize: 16, lineHeight: 1, padding: 0, cursor: 'pointer' }}>+</button>
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
+                <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Color</span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {PROJECT_COLORS.map(hex => (
+                    <button key={hex} type="button" aria-label={`Colour ${hex}`} onClick={() => setNhColor(hex)} style={{ width: 20, height: 20, borderRadius: '50%', padding: 0, cursor: 'pointer', background: hex, border: `2px solid ${nhColor === hex ? '#fff' : 'transparent'}` }} />
+                  ))}
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={nhBusy || !nhName.trim()}
+                className="fr-btn"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: (nhBusy || !nhName.trim()) ? 'default' : 'pointer', opacity: (nhBusy || !nhName.trim()) ? 0.6 : 1 }}
+              >
+                {nhBusy ? 'Adding…' : 'Add habit'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- Habit history modal (calendar heatmap + retroactive marking) ---------- */}
+      {historyHabitId && (() => {
+        const h = habits.find(x => x.id === historyHabitId)
+        if (!h) return null
+        const color = h.color || c.accent
+        const weekly = h.kind === 'Weekly'
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={`History: ${h.name}`}
+            onClick={() => setHistoryHabitId(null)}
+            style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          >
+            <div
+              className="fr-modal"
+              onClick={e => e.stopPropagation()}
+              style={{ width: 720, maxWidth: '94vw', maxHeight: '88vh', overflowY: 'auto', background: c.surface, border: `1px solid ${c.line}`, borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                <span style={{ width: 11, height: 11, borderRadius: '50%', background: color, flexShrink: 0 }} />
+                <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>{h.icon ? `${h.icon} ` : ''}{h.name}</h2>
+                <span style={{ ...mono, fontSize: 10, color: c.faint }}>{weekly ? `${h.targetCount}×/week` : 'Daily'}</span>
+                <span style={{ flex: 1 }} />
+                <button onClick={() => setHistoryHabitId(null)} aria-label="Close" className="fr-press" style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 18 }}>
+                <StatChip value={`🔥 ${h.currentStreak}`} label={weekly ? (h.currentStreak === 1 ? 'week streak' : 'weeks streak') : (h.currentStreak === 1 ? 'day streak' : 'days streak')} />
+                <StatChip value={`${h.longestStreak}`} label={weekly ? 'best · weeks' : 'best · days'} />
+                {weekly && <StatChip value={`${h.thisWeekCount}/${h.targetCount}`} label="this week" />}
+                <StatChip value={`${historyDates.length}`} label="check-ins" />
+              </div>
+              {historyLoading ? (
+                <div style={{ ...mono, fontSize: 11, color: c.faint }}>Loading…</div>
+              ) : (
+                <>
+                  <HabitHeatmap dates={historyDates} color={color} onToggle={(date, done) => toggleDate(h, date, done)} />
+                  <div style={{ ...mono, fontSize: 10, color: c.faint, marginTop: 10 }}>Tap any day to add or remove a check-in — including past days.</div>
+                </>
+              )}
+            </div>
+          </div>
+        )
+      })()}
 
     </div>
   )
