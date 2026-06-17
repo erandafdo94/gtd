@@ -526,7 +526,7 @@ function Segmented<O extends string>({
       {options.map(o => {
         const on = value === o
         return (
-          <button key={o} className="fr-press" onClick={() => onChange(o)} style={{
+          <button key={o} type="button" className="fr-press" onClick={() => onChange(o)} style={{
             fontFamily: 'var(--sans)', fontSize: 12.5, fontWeight: 600, letterSpacing: '0.01em',
             borderRadius: 999, padding: '7px 16px', border: 'none',
             background: on ? c.accent : 'transparent',
