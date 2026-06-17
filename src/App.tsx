@@ -9,6 +9,7 @@ import {
   useState, useEffect, useRef, useMemo,
   type CSSProperties, type ReactNode, Fragment,
 } from 'react'
+import { Helmet } from 'react-helmet-async'
 
 /* =====================================================================
    TYPES
@@ -2467,6 +2468,10 @@ export default function App() {
 
   return (
     <div className="fr-shell" style={{ minHeight: '100vh', position: 'relative', zIndex: 1 }}>
+      <Helmet>
+        <title>Focus Router</title>
+        <meta name="robots" content="noindex, nofollow" />
+      </Helmet>
       <style>{`
         .fr-btn{transition:transform .08s ease, filter .15s ease, box-shadow .2s ease;}
         .fr-btn:hover{filter:brightness(1.09);}
