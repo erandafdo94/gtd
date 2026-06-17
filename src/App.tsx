@@ -45,7 +45,9 @@ type DayStats = {
 
 // showMaintenance: the Maintenance lane is hidden from the Projects tab by
 // default (perpetual upkeep shouldn't tempt a click); a link reveals it.
-type Tweaks = { accent: string; showMaintenance?: boolean }
+// bedtime: "HH:MM" (24h); unset = the wind-down banner is off. windDownMins:
+// how long before bedtime the dashboard starts nudging you to wrap up.
+type Tweaks = { accent: string; showMaintenance?: boolean; bedtime?: string; windDownMins?: number }
 
 type State = {
   tasks: Task[]
@@ -231,6 +233,91 @@ const defaultEnergy = (): Energy => {
 }
 const fmtClock = (s: number) =>
   `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+
+/* ----- bedtime / wind-down ----- */
+// Wind-down lead times offered in Settings (minutes before bedtime).
+const WINDDOWN_OPTS = [30, 60, 90] as const
+const DEFAULT_WINDDOWN = 60
+// Render "HH:MM" (24h, as stored) as a friendly 12-hour clock, e.g. "11:00 PM".
+const fmtHm12 = (hm: string): string => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hm)
+  if (!m) return hm
+  const h = Number(m[1]) % 24
+  const ampm = h < 12 ? 'AM' : 'PM'
+  const h12 = h % 12 === 0 ? 12 : h % 12
+  return `${h12}:${m[2]} ${ampm}`
+}
+// Signed minutes from `now` to bedtime, wrapped into a ±12h window so a
+// just-passed bedtime reads as a small negative (not "23h until"). Negative =
+// past bedtime. null when bedtime is unset or malformed.
+const minsToBedtime = (bedtime: string | undefined, now: Date): number | null => {
+  if (!bedtime) return null
+  const m = /^(\d{1,2}):(\d{2})$/.exec(bedtime)
+  if (!m) return null
+  const bedMin = (Number(m[1]) % 24) * 60 + Number(m[2])
+  const nowMin = now.getHours() * 60 + now.getMinutes()
+  let delta = bedMin - nowMin
+  if (delta > 720) delta -= 1440
+  else if (delta <= -720) delta += 1440
+  return delta
+}
+// "HH:MM" minus N minutes, wrapping past midnight. Used to show when the
+// wind-down window opens.
+const subMinutes = (hm: string, mins: number): string => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hm)
+  if (!m) return hm
+  const total = (((Number(m[1]) % 24) * 60 + Number(m[2]) - mins) % 1440 + 1440) % 1440
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+}
+// Compact "past bedtime" label: "23m" / "1h 05m".
+const fmtPast = (mins: number): string => {
+  if (mins < 60) return `${mins}m`
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`
+}
+
+type BedtimeTone = 'soon' | 'close' | 'past'
+type BedtimeBanner = { tone: BedtimeTone; title: string; body: string; nightKey: string }
+// The escalating dashboard banner, or null when no nudge is due. Honors the
+// wind-down lead time, goes quiet ~3h past bedtime (you're presumably asleep),
+// and adapts copy to whether a focus session is running.
+const bedtimeBanner = (
+  bedtime: string | undefined,
+  windDownMins: number,
+  now: Date,
+  focusing: boolean,
+): BedtimeBanner | null => {
+  const delta = minsToBedtime(bedtime, now)
+  if (delta === null) return null
+  if (delta > windDownMins) return null   // too early — leave them be
+  if (delta < -180) return null            // deep night — stop nagging
+  const time = fmtHm12(bedtime!)
+  // The calendar date the bedtime instant falls on — used to scope dismissal
+  // to a single night, so a new evening surfaces the banner again.
+  const nightKey = dateKey(new Date(now.getTime() + delta * 60000))
+  if (delta > 30) {
+    return {
+      tone: 'soon', nightKey,
+      title: 'Wind down soon',
+      body: `Bedtime's at ${time}, about ${delta} min out. Start wrapping up — pick a clean stopping point.`,
+    }
+  }
+  if (delta > 0) {
+    return {
+      tone: 'close', nightKey,
+      title: `${delta} min to bedtime`,
+      body: focusing
+        ? `Bedtime's at ${time}. Finish this pomodoro, then call it a day — don't queue another.`
+        : `Bedtime's at ${time}. Don't start anything big now — start heading to bed.`,
+    }
+  }
+  return {
+    tone: 'past', nightKey,
+    title: 'Past your bedtime',
+    body: focusing
+      ? `It's ${fmtPast(-delta)} past ${time}. Hard workers forget to sleep — finish up and stop.`
+      : `It's ${fmtPast(-delta)} past ${time}. Sleep is the real productivity hack — call it a night.`,
+  }
+}
 
 const E_SCORE: Record<Energy, number> = { Low: 0, Med: 1, High: 2 }
 
@@ -1110,6 +1197,13 @@ export default function App() {
   // learning tip — random pick, stable for the session
   const [tipIdx] = useState(() => Math.floor(Math.random() * TIPS.length))
 
+  // bedtime / wind-down — a wall clock that ticks each minute so the banner's
+  // countdown and escalation stay live, plus a per-night dismissal flag.
+  const [clock, setClock] = useState(() => new Date())
+  const [bedtimeDismissed, setBedtimeDismissed] = useState<string | null>(() => {
+    try { return localStorage.getItem('focus_bedtime_dismissed') } catch { return null }
+  })
+
   /* ----- persistence ----- */
   useEffect(() => {
     try {
@@ -1142,9 +1236,11 @@ export default function App() {
           : { date: todayKey(), ids: [] }
         // Retired tweaks ('Split'/'Paired'/'Stacked' layouts) and the habit
         // tracker may linger in stored JSON — only known fields are picked up.
-        const tweaks = {
+        const tweaks: Tweaks = {
           accent: parsed.tweaks?.accent ?? DEFAULT_STATE.tweaks.accent,
           showMaintenance: parsed.tweaks?.showMaintenance ?? false,
+          bedtime: parsed.tweaks?.bedtime,
+          windDownMins: parsed.tweaks?.windDownMins,
         }
         setState(s => ({
           ...DEFAULT_STATE,
@@ -1176,6 +1272,13 @@ export default function App() {
         setBtc({ p: d.bitcoin.usd, c: d.bitcoin.usd_24h_change }))
       .catch(() => setBtc({ err: true }))
   }, [])
+
+  /* ----- bedtime banner: tick the wall clock once a minute ----- */
+  useEffect(() => {
+    if (!state.tweaks.bedtime) return
+    const id = setInterval(() => setClock(new Date()), 60_000)
+    return () => clearInterval(id)
+  }, [state.tweaks.bedtime])
 
   /* ----- music: reload the source on station switch ----- */
   useEffect(() => {
@@ -1903,6 +2006,19 @@ export default function App() {
   const toggleWidget = (id: WidgetId) =>
     setState(s => ({ ...s, widgets: { ...s.widgets, [id]: !s.widgets[id] } }))
 
+  // Bedtime wind-down banner: due unless already dismissed for tonight.
+  const bedBanner = bedtimeBanner(
+    state.tweaks.bedtime,
+    state.tweaks.windDownMins ?? DEFAULT_WINDDOWN,
+    clock,
+    inFocus,
+  )
+  const showBedBanner = bedBanner && bedtimeDismissed !== bedBanner.nightKey
+  const dismissBedtime = (nightKey: string) => {
+    setBedtimeDismissed(nightKey)
+    try { localStorage.setItem('focus_bedtime_dismissed', nightKey) } catch { /* ignore */ }
+  }
+
   if (!loaded) {
     return <div style={{ ...mono, padding: 44, color: c.dim, fontSize: 12, letterSpacing: '0.08em' }}>loading…</div>
   }
@@ -2403,6 +2519,8 @@ export default function App() {
           animation:frFade .2s ease;
         }
         @keyframes frFade{from{opacity:0} to{opacity:1}}
+        .fr-rise{animation:frRise .26s ease both;}
+        @keyframes frRise{from{opacity:0; transform:translateY(-6px)} to{opacity:1; transform:none}}
         .fr-drawer{
           position:fixed; top:0; right:0; bottom:0; width:min(460px, 94vw);
           background:var(--surface); border-left:1px solid var(--hair); z-index:75;
@@ -2555,6 +2673,54 @@ export default function App() {
         {/* ================= DASHBOARD ================= */}
         {view === 'dashboard' && (
           <Fragment>
+            {/* BEDTIME — escalating wind-down banner (hard workers forget to sleep) */}
+            {showBedBanner && bedBanner && (() => {
+              const tone = bedBanner.tone === 'past'
+                ? { bg: 'color-mix(in srgb, var(--down) 13%, transparent)', line: 'color-mix(in srgb, var(--down) 34%, transparent)', fg: c.down }
+                : { bg: c.accentSoft, line: c.accentLine, fg: c.accent }
+              return (
+                <div
+                  role="status"
+                  className="fr-rise"
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 18,
+                    background: tone.bg, border: `1px solid ${tone.line}`, borderRadius: 14,
+                    padding: '13px 14px',
+                  }}
+                >
+                  <span aria-hidden="true" style={{
+                    width: 34, height: 34, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center',
+                    background: c.surface, border: `1px solid ${tone.line}`, color: tone.fg, marginTop: 1,
+                  }}>
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+                    </svg>
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ ...T.bodyStrong, fontSize: 13.5, color: c.text }}>{bedBanner.title}</div>
+                    <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5, marginTop: 2 }}>{bedBanner.body}</div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                      {inFocus && bedBanner.tone !== 'soon' && (
+                        <Btn
+                          size="sm" variant="outline"
+                          onClick={() => setTimer(t => ({ ...t, phase: 'outcome', running: false, endsAt: null }))}
+                        >■ End session</Btn>
+                      )}
+                      <Btn size="sm" variant="ghost" onClick={() => dismissBedtime(bedBanner.nightKey)}>Dismiss for tonight</Btn>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => dismissBedtime(bedBanner.nightKey)}
+                    aria-label="Dismiss"
+                    className="fr-press"
+                    style={{
+                      flexShrink: 0, width: 26, height: 26, display: 'grid', placeItems: 'center',
+                      background: 'transparent', border: 'none', color: c.faint, cursor: 'pointer', borderRadius: 8, fontSize: 15,
+                    }}
+                  >✕</button>
+                </div>
+              )
+            })()}
             {/* AMBIENT ROW — music · word · book across the top */}
             {(wMusic || wWord || wTip) && (
               <div className="fr-ambient">
@@ -3027,6 +3193,55 @@ export default function App() {
                 )}
               </Card>
             )}
+
+            <Card label="Sleep & wind-down">
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ ...T.body, fontSize: 13.5, color: c.text, fontWeight: 600 }}>Bedtime reminder</div>
+                  <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5, marginTop: 2 }}>
+                    Set when you want to be asleep. As it nears, the dashboard nudges you to wrap up — because hard workers forget to stop.
+                  </div>
+                </div>
+                <Toggle
+                  on={!!state.tweaks.bedtime}
+                  onClick={() => setTweak('bedtime', state.tweaks.bedtime ? undefined : '23:00')}
+                />
+              </div>
+              {state.tweaks.bedtime && (() => {
+                const W = state.tweaks.windDownMins ?? DEFAULT_WINDDOWN
+                return (
+                  <>
+                    <div style={dividerStyle} />
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                      <label htmlFor="bedtime-in" style={{ ...T.body, fontSize: 13, color: c.text2, fontWeight: 600 }}>Bedtime</label>
+                      <label className="fr-field" style={{ borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, padding: '0 12px' }}>
+                        <input
+                          id="bedtime-in"
+                          type="time"
+                          value={state.tweaks.bedtime}
+                          onChange={e => setTweak('bedtime', e.target.value || '23:00')}
+                          style={{ border: 'none', background: 'transparent', color: c.text, fontFamily: 'var(--sans)', fontSize: 14, padding: '10px 0', outline: 'none', colorScheme: 'dark' }}
+                        />
+                      </label>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginTop: 14 }}>
+                      <div>
+                        <div style={{ ...T.body, fontSize: 13, color: c.text2, fontWeight: 600 }}>Start wind-down</div>
+                        <div style={{ ...mono, fontSize: 10.5, color: c.faint, marginTop: 2 }}>how early the nudges begin</div>
+                      </div>
+                      <Segmented
+                        options={WINDDOWN_OPTS.map(n => `${n} min`)}
+                        value={`${W} min`}
+                        onChange={v => setTweak('windDownMins', parseInt(v, 10))}
+                      />
+                    </div>
+                    <div style={{ ...mono, fontSize: 10.5, color: c.faint, marginTop: 16, lineHeight: 1.6 }}>
+                      Nudges begin at <b style={{ color: c.text2 }}>{fmtHm12(subMinutes(state.tweaks.bedtime!, W))}</b>, building toward bedtime at <b style={{ color: c.text2 }}>{fmtHm12(state.tweaks.bedtime!)}</b>. Dismissing a banner silences it until tomorrow night.
+                    </div>
+                  </>
+                )
+              })()}
+            </Card>
           </div>
           )
         })()}
