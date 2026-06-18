@@ -1716,7 +1716,11 @@ export default function App() {
   // reopen); only their done/open state is left untouched.
   const doneBasketIds = useMemo(() => new Set(state.baskets.filter(b => b.completedAt).map(b => b.id)), [state.baskets])
   const openTasks = state.tasks.filter(t => !t.done && !(t.basketId && doneBasketIds.has(t.basketId)))
-  const inbox = state.tasks.filter(t => !t.basketId)
+  // Inbox = loose, *untriaged* tasks. A task you've committed to Today is no
+  // longer "waiting in the inbox" — it shows in the Today list instead, so we
+  // exclude it here. (The task still has basketId null; when today.ids resets
+  // at the next day rollover, any unfinished one falls back into this list.)
+  const inbox = state.tasks.filter(t => !t.basketId && !state.today.ids.includes(t.id))
   const todayTasks = state.today.ids
     .map(id => state.tasks.find(t => t.id === id))
     .filter((t): t is Task => !!t)
@@ -2036,7 +2040,7 @@ export default function App() {
   }
 
   /* ----- task row (projects tab) — works for inbox and project lists ----- */
-  const taskRow = (t: Task, dotColor?: string) => {
+  const taskRow = (t: Task, dotColor?: string, pullToday = false) => {
     const age = daysOld(t.createdAt)
     const aged = age >= 3 && !t.done
     const taskMenu: MenuEntry[] = [
@@ -2067,6 +2071,20 @@ export default function App() {
         {dotColor && <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />}
         <span style={{ ...T.taskTitle, textDecoration: t.done ? 'line-through' : 'none', flex: 1, color: c.text }}>{t.title}</span>
         {aged && <span style={{ ...mono, fontSize: 10, color: c.accent, letterSpacing: '0.01em' }}>{age}d · review</span>}
+        {pullToday && !t.done && state.today.ids.length < TODAY_CAP && (
+          <button
+            onClick={() => addToToday(t.id)}
+            aria-label={`Add "${t.title}" to today`}
+            title="Add to today"
+            className="fr-press"
+            style={{
+              ...mono, fontSize: 11, color: c.accent, flexShrink: 0,
+              border: `1px solid ${c.accentLine}`, background: 'transparent',
+              borderRadius: 8, padding: '4px 8px', cursor: 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}
+          ><span aria-hidden="true">↑</span> Today</button>
+        )}
         <Tag>{t.mins}m</Tag>
         <Tag>{t.energy}</Tag>
         <MenuButton ariaLabel={`Options for task "${t.title}"`} entries={taskMenu} />
@@ -2937,7 +2955,7 @@ export default function App() {
 
         {/* ================= INBOX (tasks without a project) ================= */}
         {view === 'inbox' && (() => {
-          const all = state.tasks.filter(t => !t.basketId)
+          const all = inbox
           const shown = (hideCompleted ? all.filter(t => !t.done) : all).sort((a, b) => Number(a.done) - Number(b.done))
           const openN = all.filter(t => !t.done).length
           return (
@@ -2954,7 +2972,7 @@ export default function App() {
                 </div>
               )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {shown.map(t => taskRow(t))}
+                {shown.map(t => taskRow(t, undefined, true))}
                 <input
                   className="fr-in"
                   placeholder="+ add task…  (enter)"
