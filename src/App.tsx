@@ -74,7 +74,7 @@ type TimerState = {
 
 // Sidebar sections. `habits` is the structured habit tracker (server-backed,
 // separate from the local-first State blob).
-type View = 'dashboard' | 'inbox' | 'projects' | 'settings' | 'habits'
+type View = 'dashboard' | 'inbox' | 'projects' | 'settings' | 'habits' | 'goals'
 
 // A habit + its server-computed stats. Daily habits track a consecutive-day
 // streak; Weekly habits target N check-ins per ISO week. The stat fields
@@ -96,6 +96,40 @@ type Habit = {
   weekDates: string[]
   recentDates: string[]
 }
+
+// The goal ladder (GTD horizons of focus × SMART goals). All five horizons are
+// server-backed rows in one self-referencing table; `parentGoalId` links a goal
+// up to one a tier higher (Week → Year → Horizon5 → Vision25). The vision tiers
+// are aspirational (no metric); Year/Month/Week carry a measurable target, unit,
+// and due date. `progressPct` is computed by the backend from current/target.
+type GoalHorizon = 'Vision25' | 'Horizon5' | 'Year' | 'Month' | 'Week'
+type GoalStatus = 'Active' | 'Completed' | 'Abandoned'
+type Goal = {
+  id: string
+  title: string
+  description?: string | null
+  horizon: GoalHorizon
+  parentGoalId?: string | null
+  targetValue?: number | null
+  currentValue?: number | null
+  unit?: string | null
+  dueDate?: string | null
+  status: GoalStatus
+  color?: string | null
+  icon?: string | null
+  sortOrder: number
+  archived: boolean
+  progressPct?: number | null
+}
+// Ordered top (farthest) → bottom (nearest). `metric` marks the SMART tiers that
+// take a numeric target; `parent` is the horizon a goal of this tier links up to.
+const GOAL_HORIZONS: { key: GoalHorizon; label: string; kicker: string; color: string; metric: boolean; parent: GoalHorizon | null }[] = [
+  { key: 'Vision25', label: '25-year vision', kicker: 'purpose',    color: '#9a6bff', metric: false, parent: null },
+  { key: 'Horizon5', label: '5-year horizon', kicker: 'milestones', color: '#4f8cff', metric: false, parent: 'Vision25' },
+  { key: 'Year',     label: 'This year',      kicker: 'SMART goals', color: '#ff5a36', metric: true,  parent: 'Horizon5' },
+  { key: 'Month',    label: 'This month',     kicker: 'focus',       color: '#e8c54a', metric: true,  parent: 'Year' },
+  { key: 'Week',     label: 'This week',      kicker: 'cadence',     color: '#ff6b9d', metric: true,  parent: 'Month' },
+]
 
 /* =====================================================================
    PALETTE + TYPE RAMP
@@ -234,6 +268,8 @@ const defaultEnergy = (): Energy => {
 }
 const fmtClock = (s: number) =>
   `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+// Compact number for goal progress: drop trailing decimals, add thousands sep.
+const fmtNum = (n: number) => Math.round(n).toLocaleString()
 
 /* ----- bedtime / wind-down ----- */
 // Wind-down lead times offered in Settings (minutes before bedtime).
@@ -347,25 +383,46 @@ function loadGis(): Promise<void> {
   return gisPromise
 }
 
-// Non-lossy merge used on sign-in: union projects + tasks by id (server wins on
-// a conflict), union stats by day, keep today only if it's still today, and
-// keep local device prefs (widgets/accent).
-function mergeState(local: State, server: Partial<State>): State {
-  const unionById = <T extends { id: string }>(a: T[], b: T[]): T[] => {
-    const m = new Map<string, T>()
-    for (const x of a) m.set(x.id, x)
-    for (const x of b) m.set(x.id, x)
-    return [...m.values()]
+// Sanitize a State blob loaded from the server into a complete, valid State.
+// Drops legacy demo baskets, normalizes basket status + colors, caps the ongoing
+// lane, resets today's picks if stale, and keeps only known tweak fields. A null/
+// empty blob (new user) yields DEFAULT_STATE.
+function normalizeState(parsed: Partial<State> | null | undefined): State {
+  if (!parsed) return DEFAULT_STATE
+  // One-time cleanup: earlier builds shipped the design prototype's personal demo
+  // baskets as defaults. Drop any of them that hold no tasks.
+  const DEMO: Record<string, string> = { b1: 'SaaS / GA4', b2: 'NZ move', b3: 'Learning' }
+  const tasks = parsed.tasks ?? []
+  // Pre-status builds stored baskets as plain {id,name} — default those to backlog.
+  // Ongoing beyond the cap demotes to up-next, first-come first-kept.
+  let ongoingSeen = 0
+  const baskets = (parsed.baskets ?? [])
+    .filter(b => DEMO[b.id] !== b.name || tasks.some(t => t.basketId === b.id))
+    .map((b, i) => {
+      let status: BasketStatus = BASKET_STATUSES.some(s => s.key === b.status) ? b.status : 'backlog'
+      if (status === 'ongoing' && ++ongoingSeen > ONGOING_CAP) status = 'next'
+      const color = typeof b.color === 'string' && b.color ? b.color : PROJECT_COLORS[i % PROJECT_COLORS.length]
+      return { ...b, status, color }
+    })
+  // Today's picks reset each day; drop ids whose task no longer exists.
+  const today = parsed.today && parsed.today.date === todayKey()
+    ? { date: parsed.today.date, ids: (parsed.today.ids ?? []).filter(id => tasks.some(t => t.id === id)).slice(0, TODAY_CAP) }
+    : { date: todayKey(), ids: [] }
+  // Only known tweak fields are picked up (retired layout tweaks may linger).
+  const tweaks: Tweaks = {
+    accent: parsed.tweaks?.accent ?? DEFAULT_STATE.tweaks.accent,
+    showMaintenance: parsed.tweaks?.showMaintenance ?? false,
+    bedtime: parsed.tweaks?.bedtime,
+    windDownMins: parsed.tweaks?.windDownMins,
   }
-  const today = server.today && server.today.date === todayKey()
-    ? server.today
-    : local.today.date === todayKey() ? local.today : { date: todayKey(), ids: [] }
   return {
-    ...local,
-    baskets: unionById(local.baskets, server.baskets ?? []),
-    tasks: unionById(local.tasks, server.tasks ?? []),
-    stats: { ...local.stats, ...(server.stats ?? {}) },
+    ...DEFAULT_STATE,
+    tasks,
+    baskets,
     today,
+    widgets: { ...DEFAULT_STATE.widgets, ...(parsed.widgets ?? {}) },
+    tweaks,
+    stats: parsed.stats ?? {},
   }
 }
 
@@ -1041,7 +1098,7 @@ function InlineEdit({ value, onCommit, onCancel, style }: {
    SIDE NAV
    ===================================================================== */
 function SideNav({
-  view, onView, open, onClose, inboxCount, projectCount, habitCount, footer,
+  view, onView, open, onClose, inboxCount, projectCount, habitCount, goalCount, footer,
 }: {
   view: View
   onView: (v: View) => void
@@ -1050,6 +1107,7 @@ function SideNav({
   inboxCount: number
   projectCount: number
   habitCount: number
+  goalCount: number
   /** Rendered pinned to the bottom of the sidebar (account / sync). */
   footer?: ReactNode
 }) {
@@ -1095,6 +1153,7 @@ function SideNav({
         {navItem('inbox', '▣', 'Inbox', inboxCount)}
         {navItem('projects', '▦', 'Projects', projectCount)}
         {navItem('habits', '◉', 'Habits', habitCount)}
+        {navItem('goals', '◆', 'Goals', goalCount)}
       </nav>
       {footer}
     </aside>
@@ -1106,7 +1165,11 @@ function SideNav({
    ===================================================================== */
 export default function App() {
   const [state, setState] = useState<State>(DEFAULT_STATE)
-  const [loaded, setLoaded] = useState(false)
+  // App data is server-backed (DB is the source of truth). `authResolved` = the
+  // boot-time token check has run; `stateLoaded` = the user's /api/state has been
+  // fetched. The app body renders only once both are true and `auth` is set.
+  const [authResolved, setAuthResolved] = useState(false)
+  const [stateLoaded, setStateLoaded] = useState(false)
   const [view, setView] = useState<View>('dashboard')
   const [customize, setCustomize] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -1130,10 +1193,24 @@ export default function App() {
   const [historyDates, setHistoryDates] = useState<string[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
 
+  // Goal ladder (server-backed, like habits — kept out of the State blob).
+  const [goals, setGoals] = useState<Goal[]>([])
+  const [goalsLoading, setGoalsLoading] = useState(false)
+  const [goalsErr, setGoalsErr] = useState(false)
+  // New-goal modal form.
+  const [newGoalOpen, setNewGoalOpen] = useState(false)
+  const [ngHorizon, setNgHorizon] = useState<GoalHorizon>('Year')
+  const [ngTitle, setNgTitle] = useState('')
+  const [ngTarget, setNgTarget] = useState('')
+  const [ngCurrent, setNgCurrent] = useState('')
+  const [ngUnit, setNgUnit] = useState('')
+  const [ngDue, setNgDue] = useState('')
+  const [ngParent, setNgParent] = useState('')
+  const [ngBusy, setNgBusy] = useState(false)
+
   // auth / sync (optional)
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [syncErr, setSyncErr] = useState(false)
-  const [signInOpen, setSignInOpen] = useState(false)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [emailField, setEmailField] = useState('')
   const [pwField, setPwField] = useState('')
@@ -1149,10 +1226,6 @@ export default function App() {
   const [pwChanging, setPwChanging] = useState(false) // reveal the form to change an existing password
   const gisRef = useRef<HTMLDivElement | null>(null)
   const pulledRef = useRef(false)
-  // "Sign in to sync" nudge for anonymous users — gentle + throttled.
-  const [nudge, setNudge] = useState(false)
-  const nudgedThisSession = useRef(false)
-  const nudgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // quick add
   const [input, setInput] = useState('')
@@ -1201,69 +1274,20 @@ export default function App() {
   // bedtime / wind-down — a wall clock that ticks each minute so the banner's
   // countdown and escalation stay live, plus a per-night dismissal flag.
   const [clock, setClock] = useState(() => new Date())
-  const [bedtimeDismissed, setBedtimeDismissed] = useState<string | null>(() => {
-    try { return localStorage.getItem('focus_bedtime_dismissed') } catch { return null }
-  })
+  // Per-night dismissal of the wind-down banner — in-memory (resets on reload).
+  const [bedtimeDismissed, setBedtimeDismissed] = useState<string | null>(null)
 
-  /* ----- persistence ----- */
+  /* ----- start-fresh: purge any legacy local-first data on boot ----- */
+  // The app is now server-backed; the old localStorage blob (and the two minor
+  // UI keys) are dead. Clear them once so nothing stale lingers. The auth token
+  // (AUTH_KEY) is intentionally kept — it's the only thing we persist locally.
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<State>
-        // One-time cleanup: earlier builds shipped the design prototype's
-        // personal demo baskets as defaults and persisted them. Drop any of
-        // them that hold no tasks; ones the user actually used are kept.
-        const DEMO: Record<string, string> = { b1: 'SaaS / GA4', b2: 'NZ move', b3: 'Learning' }
-        const tasks = parsed.tasks ?? []
-        // Pre-status builds stored baskets as plain {id,name} — default those
-        // to backlog. Ongoing beyond the cap (old/imported data) demotes to
-        // up-next, first-come first-kept.
-        let ongoingSeen = 0
-        const baskets = (parsed.baskets ?? [])
-          .filter(b => DEMO[b.id] !== b.name || tasks.some(t => t.basketId === b.id))
-          .map((b, i) => {
-            let status: BasketStatus = BASKET_STATUSES.some(s => s.key === b.status) ? b.status : 'backlog'
-            if (status === 'ongoing' && ++ongoingSeen > ONGOING_CAP) status = 'next'
-            const color = typeof b.color === 'string' && b.color ? b.color : PROJECT_COLORS[i % PROJECT_COLORS.length]
-            return { ...b, status, color }
-          })
-        // Today's picks reset each day; drop ids whose task no longer exists.
-        const today = parsed.today && parsed.today.date === todayKey()
-          ? {
-              date: parsed.today.date,
-              ids: (parsed.today.ids ?? []).filter(id => tasks.some(t => t.id === id)).slice(0, TODAY_CAP),
-            }
-          : { date: todayKey(), ids: [] }
-        // Retired tweaks ('Split'/'Paired'/'Stacked' layouts) and the habit
-        // tracker may linger in stored JSON — only known fields are picked up.
-        const tweaks: Tweaks = {
-          accent: parsed.tweaks?.accent ?? DEFAULT_STATE.tweaks.accent,
-          showMaintenance: parsed.tweaks?.showMaintenance ?? false,
-          bedtime: parsed.tweaks?.bedtime,
-          windDownMins: parsed.tweaks?.windDownMins,
-        }
-        setState(s => ({
-          ...DEFAULT_STATE,
-          tasks,
-          baskets,
-          today,
-          widgets: { ...DEFAULT_STATE.widgets, ...(parsed.widgets ?? {}) },
-          tweaks,
-          stats: parsed.stats ?? s.stats,
-        }))
-      }
-    } catch { /* first run */ }
-    setLoaded(true)
+      localStorage.removeItem(STORAGE_KEY)
+      localStorage.removeItem('focus_bedtime_dismissed')
+      localStorage.removeItem('focus_nudge_at')
+    } catch { /* ignore */ }
   }, [])
-
-  useEffect(() => {
-    if (!loaded) return
-    const t = setTimeout(() => {
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)) } catch (e) { console.error(e) }
-    }, 400)
-    return () => clearTimeout(t)
-  }, [state, loaded])
 
   /* ----- btc fetch ----- */
   useEffect(() => {
@@ -1385,8 +1409,8 @@ export default function App() {
     }
   }
 
+  // Clear the sign-in form after a successful auth (the gate unmounts once auth is set).
   const closeSignIn = () => {
-    setSignInOpen(false)
     setAuthErr(null)
     setPwField('')
     setAuthBusy(false)
@@ -1460,7 +1484,7 @@ export default function App() {
     let res = await fetch(`${API_BASE}${path}`, withAuth(cur.token))
     if (res.status === 401) {
       const newToken = await refreshAccessToken()
-      if (!newToken) { applyAuth(null); pulledRef.current = false; return res }
+      if (!newToken) { applyAuth(null); pulledRef.current = false; setStateLoaded(false); return res }
       res = await fetch(`${API_BASE}${path}`, withAuth(newToken))
     }
     return res
@@ -1477,27 +1501,40 @@ export default function App() {
     }
     applyAuth(null)
     pulledRef.current = false
+    setStateLoaded(false)
+    setState(DEFAULT_STATE)
     setSyncErr(false)
   }
 
-  /* ----- auth: restore session on boot ----- */
+  /* ----- auth: restore session on boot, then mark auth resolved ----- */
   useEffect(() => {
     try { const raw = localStorage.getItem(AUTH_KEY); if (raw) { const a = JSON.parse(raw) as AuthState; if (a?.token && a?.refreshToken) applyAuth(a) } } catch { /* ignore */ }
+    setAuthResolved(true)
   }, [])
 
-  /* ----- auth: pull + merge server state once after sign-in ----- */
+  /* ----- state: load the user's blob from the server once after sign-in ----- */
+  // The DB is the single source of truth. A new user's blob is null -> DEFAULT_STATE.
   useEffect(() => {
-    if (!loaded || !auth || !SYNC_ON || pulledRef.current) return
+    if (!auth || pulledRef.current) return
     pulledRef.current = true
     authedFetch('/api/state')
       .then(r => (r && r.ok ? r.json() : null))
-      .then((d: { state?: Partial<State> } | null) => { if (d && d.state) setState(s => mergeState(s, d.state!)) })
-      .catch(() => { /* offline / unconfigured — stays local-first */ })
-  }, [loaded, auth])
+      .then((d: { state?: Partial<State> } | null) => {
+        setState(normalizeState(d?.state))
+        setStateLoaded(true)
+      })
+      .catch(() => {
+        // Couldn't reach the server — fall back to an empty workspace so the app
+        // is usable; the next change retries the PUT. (authedFetch clears auth on
+        // a failed refresh, which returns the user to the gate.)
+        setState(DEFAULT_STATE)
+        setStateLoaded(true)
+      })
+  }, [auth])
 
-  /* ----- auth: push state to server (debounced, best-effort) ----- */
+  /* ----- state: push to the server on every change (debounced) ----- */
   useEffect(() => {
-    if (!loaded || !auth || !SYNC_ON) return
+    if (!auth || !stateLoaded) return
     const t = setTimeout(() => {
       authedFetch('/api/state', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1507,7 +1544,7 @@ export default function App() {
         .catch(() => setSyncErr(true))
     }, 900)
     return () => clearTimeout(t)
-  }, [state, auth, loaded])
+  }, [state, auth, stateLoaded])
 
   /* ----- habits: load + optimistic mutations (structured /api/habits API) ----- */
   const loadHabits = async () => {
@@ -1553,6 +1590,53 @@ export default function App() {
     setHabits(hs => hs.filter(h => h.id !== id))   // optimistic
     const r = await authedFetch(`/api/habits/${id}`, { method: 'DELETE' })
     if (!r || !r.ok) { setHabits(prev); setHabitsErr(true) }
+  }
+
+  /* ----- goals: load + optimistic mutations (structured /api/goals API) ----- */
+  const loadGoals = async () => {
+    if (!auth || !SYNC_ON) return
+    setGoalsLoading(true)
+    try {
+      const r = await authedFetch('/api/goals')
+      if (r && r.ok) { setGoals(await r.json() as Goal[]); setGoalsErr(false) }
+      else if (r) setGoalsErr(true)
+    } catch { setGoalsErr(true) }
+    finally { setGoalsLoading(false) }
+  }
+
+  // Fetch goals when the tab is opened (and once auth becomes available).
+  useEffect(() => {
+    if (view === 'goals' && auth && SYNC_ON) loadGoals()
+  }, [view, auth])
+
+  const createGoal = async (input: Partial<Goal> & { title: string; horizon: GoalHorizon }) => {
+    const r = await authedFetch('/api/goals', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    if (r && r.ok) { const g = await r.json() as Goal; setGoals(gs => [...gs, g]); setGoalsErr(false) }
+    else setGoalsErr(true)
+  }
+
+  const updateGoal = async (
+    id: string,
+    patch: Partial<Pick<Goal, 'title' | 'description' | 'horizon' | 'parentGoalId' | 'targetValue' | 'currentValue' | 'unit' | 'dueDate' | 'status' | 'color' | 'icon' | 'sortOrder' | 'archived'>>,
+  ) => {
+    setGoals(gs => gs.map(g => (g.id === id ? { ...g, ...patch } : g)))   // optimistic
+    const r = await authedFetch(`/api/goals/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    if (r && r.ok) { const g = await r.json() as Goal; setGoals(gs => gs.map(x => (x.id === id ? g : x))) }
+    else { setGoalsErr(true); loadGoals() }
+  }
+
+  const deleteGoal = async (id: string) => {
+    const prev = goals
+    // Drop the goal and clear any child up-links to it (mirrors the server's SET NULL).
+    setGoals(gs => gs.filter(g => g.id !== id).map(g => (g.parentGoalId === id ? { ...g, parentGoalId: null } : g)))
+    const r = await authedFetch(`/api/goals/${id}`, { method: 'DELETE' })
+    if (!r || !r.ok) { setGoals(prev); setGoalsErr(true) }
   }
 
   const openHistory = async (h: Habit) => {
@@ -1605,6 +1689,31 @@ export default function App() {
     setNhBusy(false)
     setNewHabitOpen(false)
     setNhName(''); setNhKind('Daily'); setNhTarget(3); setNhColor(PROJECT_COLORS[0])
+  }
+
+  // Open the new-goal modal pre-set to a horizon (the + on each tier).
+  const openNewGoal = (horizon: GoalHorizon) => {
+    setNgHorizon(horizon)
+    setNgTitle(''); setNgTarget(''); setNgCurrent(''); setNgUnit(''); setNgDue(''); setNgParent('')
+    setNewGoalOpen(true)
+  }
+
+  const submitNewGoal = async () => {
+    const title = ngTitle.trim()
+    if (!title) return
+    const metric = GOAL_HORIZONS.find(h => h.key === ngHorizon)!.metric
+    setNgBusy(true)
+    await createGoal({
+      title,
+      horizon: ngHorizon,
+      parentGoalId: ngParent || null,
+      targetValue: metric && ngTarget.trim() ? Number(ngTarget) : null,
+      currentValue: metric && ngCurrent.trim() ? Number(ngCurrent) : null,
+      unit: metric && ngUnit.trim() ? ngUnit.trim() : null,
+      dueDate: metric && ngDue ? ngDue : null,
+    })
+    setNgBusy(false)
+    setNewGoalOpen(false)
   }
 
   // One habit row — Reminders-style: check circle / progress ring, name, streak,
@@ -1666,9 +1775,9 @@ export default function App() {
     )
   }
 
-  /* ----- auth: render the Google button into the sign-in modal ----- */
+  /* ----- auth: render the Google button into the login gate ----- */
   useEffect(() => {
-    if (!signInOpen || auth || !GOOGLE_ON) return
+    if (!authResolved || auth || !GOOGLE_ON) return
     let cancelled = false
     loadGis().then(() => {
       if (cancelled || !gisRef.current) return
@@ -1677,13 +1786,13 @@ export default function App() {
       if (!g?.accounts?.id) return
       g.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: (resp: { credential: string }) => handleCredential(resp.credential) })
       gisRef.current.innerHTML = ''
-      // Fit the button to the modal column (GIS clamps width to [200, 400]).
+      // Fit the button to the gate column (GIS clamps width to [200, 400]).
       const w = Math.max(200, Math.min(400, Math.round(gisRef.current.clientWidth || 300)))
       g.accounts.id.renderButton(gisRef.current, { theme: 'filled_black', size: 'large', text: 'signin_with', shape: 'pill', width: w })
     }).catch(() => { /* blocked / offline */ })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signInOpen, auth])
+  }, [authResolved, auth])
 
   /* ----- timer engine ----- */
   // `left` is recomputed from the wall-clock deadline on every tick (and on
@@ -1790,7 +1899,6 @@ export default function App() {
       tasks: [...s.tasks, { id: uid(), title, mins: addMins, energy: addEnergy, basketId, done: false, createdAt: Date.now() }],
     }))
     setInput('')
-    maybeNudge()
   }
 
   const toggleDone = (id: string) =>
@@ -1870,28 +1978,6 @@ export default function App() {
     if (undoTimer.current) clearTimeout(undoTimer.current)
     setUndoState({ msg, undo })
     undoTimer.current = setTimeout(() => setUndoState(null), 6000)
-  }
-
-  // Gently nudge anonymous users to sign in for sync. Fires at most once per
-  // session, ~25% of the time, and never within 10 min of the last nudge or
-  // dismissal (persisted so the cooldown survives reloads). No-op once signed in
-  // or when sync isn't configured.
-  const maybeNudge = () => {
-    if (!SYNC_ON || auth || nudge || nudgedThisSession.current) return
-    let last = 0
-    try { last = Number(localStorage.getItem('focus_nudge_at')) || 0 } catch { /* ignore */ }
-    if (Date.now() - last < 10 * 60 * 1000) return
-    if (Math.random() > 0.25) return
-    nudgedThisSession.current = true
-    try { localStorage.setItem('focus_nudge_at', String(Date.now())) } catch { /* ignore */ }
-    setNudge(true)
-    if (nudgeTimer.current) clearTimeout(nudgeTimer.current)
-    nudgeTimer.current = setTimeout(() => setNudge(false), 8000)
-  }
-
-  const dismissNudge = () => {
-    if (nudgeTimer.current) clearTimeout(nudgeTimer.current)
-    setNudge(false)
   }
 
   // No confirm dialog — delete immediately, offer Undo for a few seconds.
@@ -2019,12 +2105,85 @@ export default function App() {
     inFocus,
   )
   const showBedBanner = bedBanner && bedtimeDismissed !== bedBanner.nightKey
-  const dismissBedtime = (nightKey: string) => {
-    setBedtimeDismissed(nightKey)
-    try { localStorage.setItem('focus_bedtime_dismissed', nightKey) } catch { /* ignore */ }
+  const dismissBedtime = (nightKey: string) => setBedtimeDismissed(nightKey)
+
+  // Still checking the stored token on boot.
+  if (!authResolved) {
+    return <div style={{ ...mono, padding: 44, color: c.dim, fontSize: 12, letterSpacing: '0.08em' }}>loading…</div>
   }
 
-  if (!loaded) {
+  // Hard login gate — the app is database-backed and requires an account.
+  if (!auth) {
+    const gateInput: CSSProperties = {
+      width: '100%', boxSizing: 'border-box', padding: '10px 12px',
+      borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
+      fontFamily: 'var(--sans)', fontSize: 14,
+    }
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, background: c.bg }}>
+        <div style={{ width: 360, maxWidth: '100%' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 11, justifyContent: 'center', marginBottom: 22 }}>
+            <Mark size={30} />
+            <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Focus Router</span>
+          </div>
+          <div style={{ background: c.surface, border: `1px solid ${c.line}`, borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 24 }}>
+            <h1 style={{ fontFamily: 'var(--sans)', fontSize: 18, fontWeight: 700, letterSpacing: '-0.01em', margin: '0 0 4px', color: c.text }}>
+              {authMode === 'login' ? 'Log in' : 'Create account'}
+            </h1>
+            <div style={{ ...mono, fontSize: 10, color: c.faint, marginBottom: 18 }}>
+              Sign in to access your tasks, projects, habits and goals.
+            </div>
+
+            {GOOGLE_ON && (
+              <>
+                <div ref={gisRef} style={{ display: 'flex', justifyContent: 'center', colorScheme: 'light', marginBottom: 14 }} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 14px' }}>
+                  <div style={{ flex: 1, height: 1, background: c.hair }} />
+                  <span style={{ ...mono, fontSize: 9.5, color: c.faint }}>OR</span>
+                  <div style={{ flex: 1, height: 1, background: c.hair }} />
+                </div>
+              </>
+            )}
+
+            <form onSubmit={e => { e.preventDefault(); submitEmailAuth() }}>
+              <input
+                className="fr-in" type="email" autoComplete="email" placeholder="Email"
+                value={emailField} onChange={e => setEmailField(e.target.value)}
+                style={{ ...gateInput, marginBottom: 10 }}
+              />
+              <input
+                className="fr-in" type="password"
+                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                placeholder={authMode === 'login' ? 'Password' : 'Password (min 8 characters)'}
+                value={pwField} onChange={e => setPwField(e.target.value)}
+                style={gateInput}
+              />
+              {authErr && <div style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{authErr}</div>}
+              <button
+                type="submit" disabled={authBusy} className="fr-btn"
+                style={{ width: '100%', marginTop: 14, padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: authBusy ? 'default' : 'pointer', opacity: authBusy ? 0.65 : 1 }}
+              >
+                {authBusy ? 'Please wait…' : authMode === 'login' ? 'Log in' : 'Create account'}
+              </button>
+            </form>
+
+            <div style={{ ...T.body, fontSize: 12.5, color: c.dim, marginTop: 14, textAlign: 'center' }}>
+              {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+              <button
+                onClick={() => { setAuthMode(m => (m === 'login' ? 'register' : 'login')); setAuthErr(null) }}
+                style={{ background: 'none', border: 'none', padding: 0, color: c.accent, fontWeight: 600, cursor: 'pointer', fontSize: 12.5 }}
+              >
+                {authMode === 'login' ? 'Create one' : 'Log in'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Authed but the user's state blob is still loading from the server.
+  if (!stateLoaded) {
     return <div style={{ ...mono, padding: 44, color: c.dim, fontSize: 12, letterSpacing: '0.08em' }}>loading…</div>
   }
 
@@ -2585,6 +2744,7 @@ export default function App() {
         inboxCount={inbox.filter(t => !t.done).length}
         projectCount={state.baskets.filter(b => !b.completedAt).length}
         habitCount={habits.filter(h => !h.archived && !h.doneToday).length}
+        goalCount={goals.filter(g => g.horizon === 'Year' && g.status === 'Active').length}
         footer={accountSection}
       />
       <div
@@ -2638,7 +2798,7 @@ export default function App() {
         {/* ---------- header: page title + date ---------- */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
-            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : view === 'settings' ? 'Settings' : view === 'habits' ? 'Habits' : 'Projects'}
+            {view === 'dashboard' ? 'Dashboard' : view === 'inbox' ? 'Inbox' : view === 'settings' ? 'Settings' : view === 'habits' ? 'Habits' : view === 'goals' ? 'Goals' : 'Projects'}
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button
@@ -2983,7 +3143,6 @@ export default function App() {
                     if (e.key === 'Enter' && v) {
                       setState(s => ({ ...s, tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: null, done: false, createdAt: Date.now() }] }))
                       setBasketInputs({ ...basketInputs, inbox: '' })
-                      maybeNudge()
                     }
                   }}
                   style={{
@@ -3004,19 +3163,6 @@ export default function App() {
             <Card style={{ maxWidth: 620 }}>
               <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.6 }}>
                 Habits sync to your account, but sync isn’t configured for this build.
-              </div>
-            </Card>
-          )
-          if (!auth) return (
-            <Card style={{ maxWidth: 620 }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'flex-start' }}>
-                <div>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: c.text, marginBottom: 4 }}>Track your habits</div>
-                  <div style={{ ...T.body, fontSize: 13, color: c.dim }}>
-                    Sign in to create daily and weekly habits and keep your streaks synced across devices.
-                  </div>
-                </div>
-                <Btn variant="primary" onClick={() => setSignInOpen(true)}>Sign in</Btn>
               </div>
             </Card>
           )
@@ -3046,6 +3192,152 @@ export default function App() {
           )
         })()}
 
+        {/* ================= GOALS ================= */}
+        {view === 'goals' && (() => {
+          // Goals are server-backed, so the tab needs sync + sign-in (like habits).
+          if (!SYNC_ON) return (
+            <Card style={{ maxWidth: 620 }}>
+              <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.6 }}>
+                Goals sync to your account, but sync isn’t configured for this build.
+              </div>
+            </Card>
+          )
+          const active = goals.filter(g => !g.archived)
+          const byHorizon = (k: GoalHorizon) => active.filter(g => g.horizon === k)
+          const parentOf = (g: Goal) => g.parentGoalId ? active.find(x => x.id === g.parentGoalId) : undefined
+
+          // SMART goal card (Year tier): progress bar + measurable chips + up-link.
+          const smartCard = (g: Goal, tierColor: string) => {
+            const dot = g.color || tierColor
+            const pct = g.progressPct
+            const parent = parentOf(g)
+            const done = g.status === 'Completed'
+            return (
+              <div key={g.id} style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 12, padding: '13px 15px', opacity: done ? 0.6 : 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: pct != null ? 9 : 0 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: dot, flexShrink: 0 }} />
+                  <span style={{ ...T.taskTitle, flex: 1, color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{g.title}</span>
+                  {pct != null && g.targetValue != null && (
+                    <span style={{ ...mono, fontSize: 12, color: done ? c.up : c.dim }}>
+                      {fmtNum(g.currentValue ?? 0)} / {fmtNum(g.targetValue)}{g.unit ? ` ${g.unit}` : ''}
+                    </span>
+                  )}
+                  <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
+                    { kind: 'item', label: done ? 'Mark active' : 'Mark complete', onClick: () => updateGoal(g.id, { status: done ? 'Active' : 'Completed' }) },
+                    { kind: 'divider' },
+                    { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
+                  ]} />
+                </div>
+                {pct != null && (
+                  <div style={{ height: 7, background: c.bg, borderRadius: 99, overflow: 'hidden', marginBottom: 9 }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: dot, transition: 'width .3s ease' }} />
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {g.dueDate && <Tag>by {g.dueDate}</Tag>}
+                  {pct != null && <Tag>{pct}%</Tag>}
+                  {parent && (
+                    <span style={{ ...mono, fontSize: 11, fontWeight: 700, borderRadius: 7, padding: '3px 8px', background: c.accentSoft, color: c.accent, whiteSpace: 'nowrap' }}>
+                      ↗ {parent.title}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )
+          }
+
+          // Cadence row (Month/Week): Reminders-style checkable line that flips status.
+          const cadenceRow = (g: Goal, tierColor: string) => {
+            const done = g.status === 'Completed'
+            const parent = parentOf(g)
+            return (
+              <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 11px', borderRadius: 10, background: c.surface2, border: `1px solid ${c.hair}` }}>
+                <CheckCircle done={done} color={g.color || tierColor} onClick={() => updateGoal(g.id, { status: done ? 'Active' : 'Completed' })} />
+                <span style={{ ...T.body, flex: 1, color: done ? c.dim : c.text, textDecoration: done ? 'line-through' : 'none' }}>{g.title}</span>
+                {parent && <span style={{ ...mono, fontSize: 10.5, color: c.accent, whiteSpace: 'nowrap' }}>↗ {parent.title}</span>}
+                <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
+                  { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
+                ]} />
+              </div>
+            )
+          }
+
+          // Vision/Horizon card (no metric): a left-accented aspiration card.
+          const visionCard = (g: Goal, tierColor: string) => (
+            <div key={g.id} style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderLeft: `3px solid ${g.color || tierColor}`, borderRadius: '0 12px 12px 0', padding: '12px 14px', display: 'flex', alignItems: 'flex-start', gap: 9 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ ...T.taskTitle, color: c.text, marginBottom: g.description ? 3 : 0 }}>{g.title}</div>
+                {g.description && <div style={{ ...T.body, fontSize: 12.5, color: c.dim }}>{g.description}</div>}
+                {parentOf(g) && <div style={{ ...mono, fontSize: 10.5, color: c.accent, marginTop: 4 }}>↗ {parentOf(g)!.title}</div>}
+              </div>
+              <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
+                { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
+              ]} />
+            </div>
+          )
+
+          const tierHeader = (h: typeof GOAL_HORIZONS[number]) => (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, margin: '0 0 9px' }}>
+              <span style={{ ...T.kicker, fontSize: 10.5, color: c.faint }}>
+                <span style={{ color: h.color }}>◆</span> {h.label} · {h.kicker}
+              </span>
+              <span style={{ flex: 1 }} />
+              <button className="fr-press" onClick={() => openNewGoal(h.key)} aria-label={`Add ${h.label} goal`} style={{ width: 24, height: 24, borderRadius: 7, border: `1px solid ${c.hair}`, background: c.surface2, color: c.dim, fontSize: 15, lineHeight: 1, padding: 0, cursor: 'pointer' }}>+</button>
+            </div>
+          )
+
+          return (
+            <div style={{ maxWidth: 820, display: 'flex', flexDirection: 'column', gap: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 11, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Goals</span>
+                <span style={{ ...mono, fontSize: 11, color: c.faint }}>from a 25-year vision down to this week</span>
+                <span style={{ flex: 1 }} />
+                {goalsErr && <span style={{ ...mono, fontSize: 10, color: c.down }}>sync error</span>}
+                <Btn size="sm" variant="primary" onClick={() => openNewGoal('Year')}>+ New goal</Btn>
+              </div>
+
+              {active.length === 0 && !goalsLoading && (
+                <Card style={{ maxWidth: 620 }}>
+                  <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.7 }}>
+                    No goals yet. Start at the top with a 25-year vision, then add a yearly SMART
+                    goal (a measurable target with a deadline) and link it upward.
+                  </div>
+                </Card>
+              )}
+
+              {GOAL_HORIZONS.map(h => {
+                const tierGoals = byHorizon(h.key)
+                if (tierGoals.length === 0 && active.length > 0) {
+                  // Still show an empty tier header so the ladder + its add button stay visible.
+                  return (
+                    <section key={h.key}>
+                      {tierHeader(h)}
+                      <button onClick={() => openNewGoal(h.key)} style={{ ...mono, fontSize: 11, color: c.faint, background: 'transparent', border: `1px dashed ${c.hair}`, borderRadius: 10, padding: '10px 12px', width: '100%', textAlign: 'left', cursor: 'pointer' }}>
+                        + Add a {h.label.toLowerCase()} goal
+                      </button>
+                    </section>
+                  )
+                }
+                if (tierGoals.length === 0) return null
+                const grid = h.key === 'Horizon5'
+                return (
+                  <section key={h.key}>
+                    {tierHeader(h)}
+                    <div style={grid
+                      ? { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }
+                      : { display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {tierGoals.map(g =>
+                        h.key === 'Vision25' || h.key === 'Horizon5' ? visionCard(g, h.color)
+                        : h.key === 'Year' ? smartCard(g, h.color)
+                        : cadenceRow(g, h.color))}
+                    </div>
+                  </section>
+                )
+              })}
+            </div>
+          )
+        })()}
+
         {/* ================= SETTINGS ================= */}
         {view === 'settings' && (() => {
           const hasPw = !!(auth?.user.has_password || pwAddDone)
@@ -3058,31 +3350,6 @@ export default function App() {
                 <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.6 }}>
                   Sync isn’t configured for this build, so there’s no account to manage.
                   The app runs fully on this device.
-                </div>
-              ) : !auth ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16, paddingTop: 2 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
-                    <span aria-hidden="true" style={{
-                      width: 44, height: 44, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center',
-                      background: c.accentSoft, border: `1px solid ${c.accentLine}`,
-                    }}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={c.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M12 2v6m0 8v6M2 12h6m8 0h6" opacity="0" /><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" />
-                      </svg>
-                    </span>
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 15, fontWeight: 700, color: c.text, letterSpacing: '-0.01em' }}>Sync across devices</div>
-                      <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5, marginTop: 2 }}>
-                        Sign in to back up your tasks and pick up where you left off anywhere.
-                      </div>
-                    </div>
-                  </div>
-                  <div>
-                    <Btn variant="primary" onClick={() => setSignInOpen(true)}>Sign in to sync</Btn>
-                  </div>
-                  <div style={{ ...mono, fontSize: 10, color: c.faint, lineHeight: 1.6 }}>
-                    Optional. The app works fully on this device without an account.
-                  </div>
                 </div>
               ) : (
                 <>
@@ -3522,7 +3789,6 @@ export default function App() {
                     if (e.key === 'Enter' && v) {
                       setState(s => ({ ...s, tasks: [...s.tasks, { id: uid(), title: v, mins: 25, energy: 'Med', basketId: b.id, done: false, createdAt: Date.now() }] }))
                       setBasketInputs({ ...basketInputs, [addKey]: '' })
-                      maybeNudge()
                     }
                   }}
                   style={{
@@ -3552,138 +3818,6 @@ export default function App() {
         >
           <span style={{ fontFamily: 'var(--sans)', fontSize: 13, color: c.text }}>{undoState.msg}</span>
           <Btn size="sm" variant="soft" onClick={runUndo}>Undo</Btn>
-        </div>
-      )}
-
-      {/* "Sign in to sync" nudge — gentle, throttled, dismissible. */}
-      {nudge && !auth && (
-        <div
-          className="fr-modal"
-          role="status"
-          aria-live="polite"
-          style={{
-            position: 'fixed', left: 0, right: 0, bottom: 22, margin: '0 auto', width: 'fit-content', maxWidth: '92vw',
-            zIndex: 95, background: c.surface2, border: `1px solid ${c.line}`, borderRadius: 12,
-            boxShadow: 'var(--shadow-lift)', padding: '8px 8px 8px 16px',
-            display: 'flex', alignItems: 'center', gap: 12,
-          }}
-        >
-          <span style={{ fontFamily: 'var(--sans)', fontSize: 13, color: c.text }}>
-            Sign in to sync your tasks across devices.
-          </span>
-          <Btn size="sm" variant="primary" onClick={() => { dismissNudge(); setSignInOpen(true) }}>Sign in</Btn>
-          <button
-            onClick={dismissNudge}
-            aria-label="Dismiss"
-            className="fr-press"
-            style={{
-              width: 28, height: 28, borderRadius: 8, flexShrink: 0, padding: 0,
-              background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 16, lineHeight: 1,
-            }}
-          >×</button>
-        </div>
-      )}
-
-      {/* Sign-in modal — Google (optional) + email/password. */}
-      {signInOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="Sign in"
-          onClick={closeSignIn}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-          }}
-        >
-          <div
-            className="fr-modal"
-            onClick={e => e.stopPropagation()}
-            style={{
-              width: 360, maxWidth: '100%', background: c.surface, border: `1px solid ${c.line}`,
-              borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-              <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>
-                {authMode === 'login' ? 'Log in' : 'Create account'}
-              </h2>
-              <button
-                onClick={closeSignIn}
-                aria-label="Close"
-                className="fr-press"
-                style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
-              >×</button>
-            </div>
-            <div style={{ ...mono, fontSize: 10, color: c.faint, marginBottom: 16 }}>
-              Sync your tasks across devices.
-            </div>
-
-            {GOOGLE_ON && (
-              <>
-                <div ref={gisRef} style={{ display: 'flex', justifyContent: 'center', colorScheme: 'light', marginBottom: 14 }} />
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 14px' }}>
-                  <div style={{ flex: 1, height: 1, background: c.hair }} />
-                  <span style={{ ...mono, fontSize: 9.5, color: c.faint }}>OR</span>
-                  <div style={{ flex: 1, height: 1, background: c.hair }} />
-                </div>
-              </>
-            )}
-
-            <form onSubmit={e => { e.preventDefault(); submitEmailAuth() }}>
-              <input
-                className="fr-in"
-                type="email"
-                autoComplete="email"
-                placeholder="Email"
-                value={emailField}
-                onChange={e => setEmailField(e.target.value)}
-                style={{
-                  width: '100%', boxSizing: 'border-box', padding: '10px 12px', marginBottom: 10,
-                  borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
-                  fontFamily: 'var(--sans)', fontSize: 14,
-                }}
-              />
-              <input
-                className="fr-in"
-                type="password"
-                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-                placeholder={authMode === 'login' ? 'Password' : 'Password (min 8 characters)'}
-                value={pwField}
-                onChange={e => setPwField(e.target.value)}
-                style={{
-                  width: '100%', boxSizing: 'border-box', padding: '10px 12px',
-                  borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
-                  fontFamily: 'var(--sans)', fontSize: 14,
-                }}
-              />
-              {authErr && (
-                <div style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{authErr}</div>
-              )}
-              <button
-                type="submit"
-                disabled={authBusy}
-                className="fr-btn"
-                style={{
-                  width: '100%', marginTop: 14, padding: '10px 12px', borderRadius: 10,
-                  background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600,
-                  cursor: authBusy ? 'default' : 'pointer', opacity: authBusy ? 0.65 : 1,
-                }}
-              >
-                {authBusy ? 'Please wait…' : authMode === 'login' ? 'Log in' : 'Create account'}
-              </button>
-            </form>
-
-            <div style={{ ...T.body, fontSize: 12.5, color: c.dim, marginTop: 14, textAlign: 'center' }}>
-              {authMode === 'login' ? "Don't have an account? " : 'Already have an account? '}
-              <button
-                onClick={() => { setAuthMode(m => (m === 'login' ? 'register' : 'login')); setAuthErr(null) }}
-                style={{ background: 'none', border: 'none', padding: 0, color: c.accent, fontWeight: 600, cursor: 'pointer', fontSize: 12.5 }}
-              >
-                {authMode === 'login' ? 'Create one' : 'Log in'}
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
@@ -3748,6 +3882,102 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ---------- New goal modal ---------- */}
+      {newGoalOpen && (() => {
+        const tier = GOAL_HORIZONS.find(h => h.key === ngHorizon)!
+        // Parent options = goals one tier up (the up-link target).
+        const parentOpts = tier.parent ? goals.filter(g => !g.archived && g.horizon === tier.parent) : []
+        const inStyle: CSSProperties = { width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text, fontFamily: 'var(--sans)', fontSize: 14 }
+        const lbl: CSSProperties = { ...T.kicker, fontSize: 9.5, color: c.faint, display: 'block', marginBottom: 6 }
+        return (
+          <div
+            role="dialog" aria-modal="true" aria-label="New goal"
+            onClick={() => setNewGoalOpen(false)}
+            style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          >
+            <div
+              className="fr-modal"
+              onClick={e => e.stopPropagation()}
+              style={{ width: 400, maxWidth: '100%', maxHeight: '88vh', overflowY: 'auto', background: c.surface, border: `1px solid ${c.line}`, borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>New goal</h2>
+                <button onClick={() => setNewGoalOpen(false)} aria-label="Close" className="fr-press" style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+              </div>
+              <form onSubmit={e => { e.preventDefault(); submitNewGoal() }}>
+                <label style={lbl}>Horizon</label>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+                  {GOAL_HORIZONS.map(h => {
+                    const on = ngHorizon === h.key
+                    return (
+                      <button key={h.key} type="button" onClick={() => { setNgHorizon(h.key); setNgParent('') }} style={{
+                        fontFamily: 'var(--sans)', fontSize: 12, fontWeight: 600, borderRadius: 999, padding: '6px 11px', cursor: 'pointer',
+                        border: `1px solid ${on ? h.color : c.hair}`,
+                        background: on ? `${h.color}22` : 'transparent',
+                        color: on ? c.text : c.dim,
+                      }}>{h.label}</button>
+                    )
+                  })}
+                </div>
+
+                <input
+                  className="fr-in" autoFocus
+                  placeholder={tier.metric ? 'e.g. Run 1,000 km this year' : 'e.g. Be financially free'}
+                  value={ngTitle} onChange={e => setNgTitle(e.target.value)}
+                  style={{ ...inStyle, marginBottom: 14 }}
+                />
+
+                {tier.metric && (
+                  <>
+                    <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={lbl}>Current</label>
+                        <input className="fr-in" type="number" inputMode="decimal" placeholder="0" value={ngCurrent} onChange={e => setNgCurrent(e.target.value)} style={inStyle} />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={lbl}>Target</label>
+                        <input className="fr-in" type="number" inputMode="decimal" placeholder="1000" value={ngTarget} onChange={e => setNgTarget(e.target.value)} style={inStyle} />
+                      </div>
+                      <div style={{ width: 84 }}>
+                        <label style={lbl}>Unit</label>
+                        <input className="fr-in" placeholder="km" value={ngUnit} onChange={e => setNgUnit(e.target.value)} style={inStyle} />
+                      </div>
+                    </div>
+                    <div style={{ marginBottom: 14 }}>
+                      <label style={lbl}>Due date</label>
+                      <input className="fr-in" type="date" value={ngDue} onChange={e => setNgDue(e.target.value)} style={inStyle} />
+                    </div>
+                  </>
+                )}
+
+                {tier.parent && (
+                  <div style={{ marginBottom: 18 }}>
+                    <label style={lbl}>Ladders up to ({GOAL_HORIZONS.find(h => h.key === tier.parent)!.label})</label>
+                    {parentOpts.length === 0 ? (
+                      <div style={{ ...mono, fontSize: 11, color: c.faint }}>No {GOAL_HORIZONS.find(h => h.key === tier.parent)!.label.toLowerCase()} goal yet — add one first to link upward.</div>
+                    ) : (
+                      <select value={ngParent} onChange={e => setNgParent(e.target.value)} style={{ ...inStyle, appearance: 'auto' }}>
+                        <option value="">— none —</option>
+                        {parentOpts.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+                      </select>
+                    )}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={ngBusy || !ngTitle.trim()}
+                  className="fr-btn"
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: (ngBusy || !ngTitle.trim()) ? 'default' : 'pointer', opacity: (ngBusy || !ngTitle.trim()) ? 0.6 : 1 }}
+                >
+                  {ngBusy ? 'Adding…' : 'Add goal'}
+                </button>
+              </form>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ---------- Habit history modal (calendar heatmap + retroactive marking) ---------- */}
       {historyHabitId && (() => {
