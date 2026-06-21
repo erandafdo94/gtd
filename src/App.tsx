@@ -1272,10 +1272,9 @@ export default function App() {
   const [tipIdx] = useState(() => Math.floor(Math.random() * TIPS.length))
 
   // bedtime / wind-down — a wall clock that ticks each minute so the banner's
-  // countdown and escalation stay live, plus a per-night dismissal flag.
+  // countdown and escalation stay live. The banner is intentionally not
+  // dismissible: it must stay up until bedtime passes (or the window closes).
   const [clock, setClock] = useState(() => new Date())
-  // Per-night dismissal of the wind-down banner — in-memory (resets on reload).
-  const [bedtimeDismissed, setBedtimeDismissed] = useState<string | null>(null)
 
   /* ----- start-fresh: purge any legacy local-first data on boot ----- */
   // The app is now server-backed; the old localStorage blob (and the two minor
@@ -1413,18 +1412,24 @@ export default function App() {
   const closeSignIn = () => {
     setAuthErr(null)
     setPwField('')
+    setPwShow(false)
     setAuthBusy(false)
   }
 
+  // Move focus to a gate field by id (so a failed submit lands on the problem).
+  const focusGateField = (id: 'gate-email' | 'gate-password') =>
+    requestAnimationFrame(() => document.getElementById(id)?.focus())
+
   const submitEmailAuth = async () => {
     const email = emailField.trim().toLowerCase()
-    if (!email || !pwField) { setAuthErr('Enter your email and password.'); return }
-    if (authMode === 'register' && pwField.length < 8) { setAuthErr('Password must be at least 8 characters.'); return }
+    if (!email) { setAuthErr('Enter your email and password.'); focusGateField('gate-email'); return }
+    if (!pwField) { setAuthErr('Enter your email and password.'); focusGateField('gate-password'); return }
+    if (authMode === 'register' && pwField.length < 8) { setAuthErr('Password must be at least 8 characters.'); focusGateField('gate-password'); return }
     setAuthBusy(true)
     setAuthErr(null)
     const err = await handleEmailAuth(authMode, email, pwField)
     setAuthBusy(false)
-    if (err) setAuthErr(err)
+    if (err) { setAuthErr(err); focusGateField('gate-email') }
     else closeSignIn()
   }
 
@@ -2104,8 +2109,6 @@ export default function App() {
     clock,
     inFocus,
   )
-  const showBedBanner = bedBanner && bedtimeDismissed !== bedBanner.nightKey
-  const dismissBedtime = (nightKey: string) => setBedtimeDismissed(nightKey)
 
   // Still checking the stored token on boot.
   if (!authResolved) {
@@ -2118,6 +2121,10 @@ export default function App() {
       width: '100%', boxSizing: 'border-box', padding: '10px 12px',
       borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text,
       fontFamily: 'var(--sans)', fontSize: 14,
+    }
+    const gateLabel: CSSProperties = {
+      display: 'block', fontFamily: 'var(--sans)', fontSize: 11.5, fontWeight: 600,
+      color: c.dim, marginBottom: 6, letterSpacing: '0.005em',
     }
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, background: c.bg }}>
@@ -2146,19 +2153,38 @@ export default function App() {
             )}
 
             <form onSubmit={e => { e.preventDefault(); submitEmailAuth() }}>
+              <label htmlFor="gate-email" style={gateLabel}>Email</label>
               <input
-                className="fr-in" type="email" autoComplete="email" placeholder="Email"
+                id="gate-email" className="fr-in" type="email" autoComplete="email" autoFocus
+                placeholder="you@example.com"
                 value={emailField} onChange={e => setEmailField(e.target.value)}
-                style={{ ...gateInput, marginBottom: 10 }}
+                style={{ ...gateInput, marginBottom: 14 }}
               />
-              <input
-                className="fr-in" type="password"
-                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-                placeholder={authMode === 'login' ? 'Password' : 'Password (min 8 characters)'}
-                value={pwField} onChange={e => setPwField(e.target.value)}
-                style={gateInput}
-              />
-              {authErr && <div style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{authErr}</div>}
+              <label htmlFor="gate-password" style={gateLabel}>Password</label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  id="gate-password" className="fr-in" type={pwShow ? 'text' : 'password'}
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  placeholder={authMode === 'login' ? 'Your password' : 'At least 8 characters'}
+                  value={pwField} onChange={e => setPwField(e.target.value)}
+                  style={{ ...gateInput, paddingRight: 44 }}
+                />
+                <button
+                  type="button" onClick={() => setPwShow(v => !v)}
+                  aria-label={pwShow ? 'Hide password' : 'Show password'} aria-pressed={pwShow}
+                  className="fr-press"
+                  style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', width: 32, height: 32, display: 'grid', placeItems: 'center', background: 'transparent', border: 'none', color: c.faint, cursor: 'pointer', borderRadius: 8 }}
+                >
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    {pwShow
+                      ? <><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" /><path d="M3 3l18 18" /><path d="M6.61 6.61A18.5 18.5 0 0 0 2 12s3 8 10 8a9.12 9.12 0 0 0 5.39-1.61" /></>
+                      : <><path d="M2 12s3-8 10-8 10 8 10 8-3 8-10 8-10-8-10-8Z" /><circle cx="12" cy="12" r="3" /></>}
+                  </svg>
+                </button>
+              </div>
+              {authErr && (
+                <div role="alert" aria-live="polite" style={{ ...T.body, fontSize: 12, color: c.down, marginTop: 10 }}>{authErr}</div>
+              )}
               <button
                 type="submit" disabled={authBusy} className="fr-btn"
                 style={{ width: '100%', marginTop: 14, padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: authBusy ? 'default' : 'pointer', opacity: authBusy ? 0.65 : 1 }}
@@ -2857,7 +2883,7 @@ export default function App() {
         {view === 'dashboard' && (
           <Fragment>
             {/* BEDTIME — escalating wind-down banner (hard workers forget to sleep) */}
-            {showBedBanner && bedBanner && (() => {
+            {bedBanner && (() => {
               const tone = bedBanner.tone === 'past'
                 ? { bg: 'color-mix(in srgb, var(--down) 13%, transparent)', line: 'color-mix(in srgb, var(--down) 34%, transparent)', fg: c.down }
                 : { bg: c.accentSoft, line: c.accentLine, fg: c.accent }
@@ -2882,25 +2908,15 @@ export default function App() {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ ...T.bodyStrong, fontSize: 13.5, color: c.text }}>{bedBanner.title}</div>
                     <div style={{ ...T.body, fontSize: 12.5, color: c.dim, lineHeight: 1.5, marginTop: 2 }}>{bedBanner.body}</div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                      {inFocus && bedBanner.tone !== 'soon' && (
+                    {inFocus && bedBanner.tone !== 'soon' && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                         <Btn
                           size="sm" variant="outline"
                           onClick={() => setTimer(t => ({ ...t, phase: 'outcome', running: false, endsAt: null }))}
                         >■ End session</Btn>
-                      )}
-                      <Btn size="sm" variant="ghost" onClick={() => dismissBedtime(bedBanner.nightKey)}>Dismiss for tonight</Btn>
-                    </div>
+                      </div>
+                    )}
                   </div>
-                  <button
-                    onClick={() => dismissBedtime(bedBanner.nightKey)}
-                    aria-label="Dismiss"
-                    className="fr-press"
-                    style={{
-                      flexShrink: 0, width: 26, height: 26, display: 'grid', placeItems: 'center',
-                      background: 'transparent', border: 'none', color: c.faint, cursor: 'pointer', borderRadius: 8, fontSize: 15,
-                    }}
-                  >✕</button>
                 </div>
               )
             })()}
