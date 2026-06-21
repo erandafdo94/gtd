@@ -122,14 +122,16 @@ type Goal = {
   completedAt?: string | null
   progressPct?: number | null
 }
-// Ordered top (farthest) → bottom (nearest). `metric` marks the SMART tiers that
-// take a numeric target; `parent` is the horizon a goal of this tier links up to.
+// Ordered top (nearest / most actionable) → bottom (farthest / aspirational), so
+// "This week" is what you see first and the long-horizon vision is what you scroll
+// down to. `metric` marks the SMART tiers that take a numeric target; `parent` is
+// the horizon a goal of this tier links up to.
 const GOAL_HORIZONS: { key: GoalHorizon; label: string; kicker: string; color: string; metric: boolean; parent: GoalHorizon | null }[] = [
-  { key: 'Vision25', label: '25-year vision', kicker: 'purpose',    color: '#9a6bff', metric: false, parent: null },
-  { key: 'Horizon5', label: '5-year horizon', kicker: 'milestones', color: '#4f8cff', metric: false, parent: 'Vision25' },
-  { key: 'Year',     label: 'This year',      kicker: 'SMART goals', color: '#ff5a36', metric: true,  parent: 'Horizon5' },
-  { key: 'Month',    label: 'This month',     kicker: 'focus',       color: '#e8c54a', metric: true,  parent: 'Year' },
   { key: 'Week',     label: 'This week',      kicker: 'cadence',     color: '#ff6b9d', metric: true,  parent: 'Month' },
+  { key: 'Month',    label: 'This month',     kicker: 'focus',       color: '#e8c54a', metric: true,  parent: 'Year' },
+  { key: 'Year',     label: 'This year',      kicker: 'SMART goals', color: '#ff5a36', metric: true,  parent: 'Horizon5' },
+  { key: 'Horizon5', label: '5-year horizon', kicker: 'milestones', color: '#4f8cff', metric: false, parent: 'Vision25' },
+  { key: 'Vision25', label: '25-year vision', kicker: 'purpose',    color: '#9a6bff', metric: false, parent: null },
 ]
 
 /* =====================================================================
@@ -171,17 +173,17 @@ const WORDS: [string, string][] = [
   ['flow', 'complete absorption in an activity; time disappears'],
 ]
 // Evidence-based learning techniques — one surfaces at random each session.
-// Third field is a "read more" link (Wikipedia article, or a search where no
-// single article fits) — destinations verified to resolve.
+// Third field is a "read more" link to a science/essay source (cognitive-science
+// blogs and long-form essays, not Wikipedia) — destinations verified to resolve.
 const TIPS: [string, string, string][] = [
-  ['Active recall', 'test yourself instead of rereading — retrieval beats review', 'https://en.wikipedia.org/wiki/Active_recall'],
-  ['Spaced repetition', 'revisit material at growing intervals to beat the forgetting curve', 'https://en.wikipedia.org/wiki/Spaced_repetition'],
-  ['The Feynman technique', 'explain it simply, as if teaching a child — the gaps reveal themselves', 'https://en.wikipedia.org/wiki/Feynman_Technique'],
-  ['Interleaving', 'mix related topics in one session rather than blocking by subject', 'https://en.wikipedia.org/wiki/Special:Search?search=interleaving%20learning'],
-  ['Teach to learn', "you don't fully understand it until you can explain it to someone else", 'https://en.wikipedia.org/wiki/Learning_by_teaching'],
-  ['Elaboration', 'ask why and how — tie new facts to what you already know', 'https://en.wikipedia.org/wiki/Elaborative_encoding'],
-  ['Dual coding', 'pair words with visuals — a diagram sticks better than text alone', 'https://en.wikipedia.org/wiki/Dual-coding_theory'],
-  ['Chunking', 'group small items into meaningful units to stretch working memory', 'https://en.wikipedia.org/wiki/Chunking_(psychology)'],
+  ['Active recall', 'test yourself instead of rereading — retrieval beats review', 'https://www.learningscientists.org/blog/2016/6/23-1'],
+  ['Spaced repetition', 'revisit material at growing intervals to beat the forgetting curve', 'https://augmentingcognition.com/ltm.html'],
+  ['The Feynman technique', 'explain it simply, as if teaching a child — the gaps reveal themselves', 'https://fs.blog/feynman-technique/'],
+  ['Interleaving', 'mix related topics in one session rather than blocking by subject', 'https://www.learningscientists.org/blog/2016/8/11-1'],
+  ['Teach to learn', "you don't fully understand it until you can explain it to someone else", 'https://thelearnerlab.com/protege-effect/'],
+  ['Elaboration', 'ask why and how — tie new facts to what you already know', 'https://www.learningscientists.org/blog/2016/7/7-1'],
+  ['Dual coding', 'pair words with visuals — a diagram sticks better than text alone', 'https://www.learningscientists.org/blog/2016/9/1-1'],
+  ['Chunking', 'group small items into meaningful units to stretch working memory', 'https://www.scotthyoung.com/blog/2019/04/24/working-memory/'],
 ]
 // Focus music — two source kinds coexist:
 //  - 'stream'  : SomaFM 24/7 Icecast MP3, played via the root <audio>. Survives
@@ -1208,8 +1210,9 @@ export default function App() {
   const [ngDue, setNgDue] = useState('')
   const [ngParent, setNgParent] = useState('')
   const [ngBusy, setNgBusy] = useState(false)
-  // Achieved/history shelf (archived goals) — collapsed by default.
-  const [achievedOpen, setAchievedOpen] = useState(false)
+  // Which goal horizon (or the achievement history) the Goals view is showing.
+  // Opens on 'Week' — the nearest, most actionable horizon.
+  const [goalTab, setGoalTab] = useState<GoalHorizon | 'achieved'>('Week')
 
   // auth / sync (optional)
   const [auth, setAuth] = useState<AuthState | null>(null)
@@ -3302,139 +3305,129 @@ export default function App() {
             </div>
           )
 
-          const tierHeader = (h: typeof GOAL_HORIZONS[number]) => (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 9, margin: '0 0 9px' }}>
-              <span style={{ ...T.kicker, fontSize: 10.5, color: c.faint }}>
-                <span style={{ color: h.color }}>◆</span> {h.label} · {h.kicker}
-              </span>
-              <span style={{ flex: 1 }} />
-              <button className="fr-press" onClick={() => openNewGoal(h.key)} aria-label={`Add ${h.label} goal`} style={{ width: 24, height: 24, borderRadius: 7, border: `1px solid ${c.hair}`, background: c.surface2, color: c.dim, fontSize: 15, lineHeight: 1, padding: 0, cursor: 'pointer' }}>+</button>
-            </div>
-          )
+          // The "Achieved" tab — a monthly histogram of completions + the archived list.
+          const renderAchieved = () => {
+            const achieved = goals.filter(g => g.archived)
+            const hz = (k: GoalHorizon) => GOAL_HORIZONS.find(h => h.key === k)!
+            if (achieved.length === 0) {
+              return (
+                <Card style={{ maxWidth: 620 }}>
+                  <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.7 }}>
+                    Nothing achieved yet. Complete a goal, then archive it — it’ll land here with a
+                    monthly history of everything you’ve finished.
+                  </div>
+                </Card>
+              )
+            }
+            const now = new Date()
+            const months = Array.from({ length: 12 }, (_, i) => {
+              const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1)
+              return { key: `${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleString('en', { month: 'short' }), count: 0, current: i === 11 }
+            })
+            let datedCount = 0
+            achieved.forEach(g => {
+              if (!g.completedAt) return
+              const d = new Date(g.completedAt)
+              const m = months.find(x => x.key === `${d.getFullYear()}-${d.getMonth()}`)
+              if (m) { m.count++; datedCount++ }
+            })
+            const maxCount = Math.max(1, ...months.map(m => m.count))
+            const sorted = [...achieved].sort((a, b) =>
+              (b.completedAt ? Date.parse(b.completedAt) : 0) - (a.completedAt ? Date.parse(a.completedAt) : 0))
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 12, padding: '14px 15px' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
+                    <span style={{ ...T.kicker, fontSize: 10, color: c.faint }}>Achieved over time</span>
+                    <span style={{ flex: 1 }} />
+                    <span style={{ ...mono, fontSize: 11, color: c.up }}>{datedCount} in the last year</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 86 }}>
+                    {months.map(m => (
+                      <div key={m.key} title={`${m.label}: ${m.count} achieved`} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                        <span style={{ ...mono, fontSize: 10, color: m.count ? c.text : 'transparent', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{m.count || '0'}</span>
+                        <div style={{ width: '100%', maxWidth: 26, height: `${Math.round((m.count / maxCount) * 56)}px`, minHeight: m.count ? 4 : 2, borderRadius: 5, background: m.count ? (m.current ? c.accent : c.up) : c.hair, transition: 'height .3s ease' }} />
+                        <span style={{ ...mono, fontSize: 9, color: m.current ? c.text : c.faint }}>{m.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {sorted.map(g => (
+                    <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 10, background: c.surface, border: `1px solid ${c.hair}` }}>
+                      <span aria-hidden="true" style={{ color: c.up, fontSize: 13, flexShrink: 0 }}>✓</span>
+                      <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
+                      <span style={{ ...mono, fontSize: 10, color: hz(g.horizon).color, whiteSpace: 'nowrap' }}>◆ {hz(g.horizon).label}</span>
+                      {g.completedAt && <span style={{ ...mono, fontSize: 10.5, color: c.faint, whiteSpace: 'nowrap' }}>{new Date(g.completedAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+                      <MenuButton ariaLabel={`Achieved goal: ${g.title}`} entries={[
+                        { kind: 'item', label: 'Restore to active', onClick: () => updateGoal(g.id, { archived: false, status: 'Active' }) },
+                        { kind: 'divider' },
+                        { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
+                      ]} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          }
 
           return (
             <div style={{ maxWidth: 820, display: 'flex', flexDirection: 'column', gap: 20 }}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 11, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>Goals</span>
-                <span style={{ ...mono, fontSize: 11, color: c.faint }}>from a 25-year vision down to this week</span>
+                <span style={{ ...mono, fontSize: 11, color: c.faint }}>this week up to your 25-year vision</span>
                 <span style={{ flex: 1 }} />
                 {goalsErr && <span style={{ ...mono, fontSize: 10, color: c.down }}>sync error</span>}
-                <Btn size="sm" variant="primary" onClick={() => openNewGoal('Year')}>+ New goal</Btn>
+                <Btn size="sm" variant="primary" onClick={() => openNewGoal(goalTab === 'achieved' ? 'Week' : goalTab)}>+ New goal</Btn>
               </div>
 
-              {active.length === 0 && !goalsLoading && (
-                <Card style={{ maxWidth: 620 }}>
-                  <div style={{ ...mono, fontSize: 11, color: c.faint, lineHeight: 1.7 }}>
-                    No goals yet. Start at the top with a 25-year vision, then add a yearly SMART
-                    goal (a measurable target with a deadline) and link it upward.
-                  </div>
-                </Card>
-              )}
-
-              {GOAL_HORIZONS.map(h => {
-                const tierGoals = byHorizon(h.key)
-                if (tierGoals.length === 0 && active.length > 0) {
-                  // Still show an empty tier header so the ladder + its add button stay visible.
+              {/* horizon tabs — nearest first, then the achievement history */}
+              <div role="tablist" aria-label="Goal horizons" style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 2 }}>
+                {[...GOAL_HORIZONS, { key: 'achieved' as const, label: 'Achieved', color: c.up }].map(t => {
+                  const on = goalTab === t.key
+                  const count = t.key === 'achieved' ? goals.filter(g => g.archived).length : byHorizon(t.key as GoalHorizon).length
                   return (
-                    <section key={h.key}>
-                      {tierHeader(h)}
-                      <button onClick={() => openNewGoal(h.key)} style={{ ...mono, fontSize: 11, color: c.faint, background: 'transparent', border: `1px dashed ${c.hair}`, borderRadius: 10, padding: '10px 12px', width: '100%', textAlign: 'left', cursor: 'pointer' }}>
+                    <button
+                      key={t.key} role="tab" aria-selected={on} className="fr-press"
+                      onClick={() => setGoalTab(t.key as GoalHorizon | 'achieved')}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 7, whiteSpace: 'nowrap', flexShrink: 0, fontFamily: 'var(--sans)', fontSize: 12.5, fontWeight: 600, borderRadius: 999, padding: '7px 13px', cursor: 'pointer', border: `1px solid ${on ? c.accentLine : c.hair}`, background: on ? c.accentSoft : 'transparent', color: on ? c.text : c.dim }}
+                    >
+                      <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: '50%', background: t.color, flexShrink: 0 }} />
+                      {t.label}
+                      {count > 0 && <span style={{ ...mono, fontSize: 10.5, color: on ? c.accent : c.faint, fontVariantNumeric: 'tabular-nums' }}>{count}</span>}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* selected horizon — one tier at a time, no scrolling to reach this week */}
+              {goalTab !== 'achieved' && (() => {
+                const h = GOAL_HORIZONS.find(x => x.key === goalTab)!
+                const tierGoals = byHorizon(h.key)
+                return (
+                  <div>
+                    <div style={{ ...T.kicker, fontSize: 10.5, color: c.faint, margin: '0 0 12px' }}>
+                      {h.kicker}{h.parent ? ` · ladders up to ${GOAL_HORIZONS.find(x => x.key === h.parent)!.label.toLowerCase()}` : ''}
+                    </div>
+                    {tierGoals.length === 0 ? (
+                      <button onClick={() => openNewGoal(h.key)} style={{ ...mono, fontSize: 12, color: c.faint, background: 'transparent', border: `1px dashed ${c.hair}`, borderRadius: 11, padding: 14, width: '100%', textAlign: 'left', cursor: 'pointer' }}>
                         + Add a {h.label.toLowerCase()} goal
                       </button>
-                    </section>
-                  )
-                }
-                if (tierGoals.length === 0) return null
-                const grid = h.key === 'Horizon5'
-                return (
-                  <section key={h.key}>
-                    {tierHeader(h)}
-                    <div style={grid
-                      ? { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }
-                      : { display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      {tierGoals.map(g =>
-                        h.key === 'Vision25' || h.key === 'Horizon5' ? visionCard(g, h.color)
-                        : h.key === 'Year' ? smartCard(g, h.color)
-                        : cadenceRow(g, h.color))}
-                    </div>
-                  </section>
-                )
-              })}
-
-              {/* ===== Achieved / history shelf — archived goals + a monthly histogram ===== */}
-              {(() => {
-                const achieved = goals.filter(g => g.archived)
-                if (achieved.length === 0) return null
-                const hz = (k: GoalHorizon) => GOAL_HORIZONS.find(h => h.key === k)!
-                // Last 12 months, oldest → newest, bucketed by completion month.
-                const now = new Date()
-                const months = Array.from({ length: 12 }, (_, i) => {
-                  const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1)
-                  return { key: `${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleString('en', { month: 'short' }), count: 0, current: i === 11 }
-                })
-                let datedCount = 0
-                achieved.forEach(g => {
-                  if (!g.completedAt) return
-                  const d = new Date(g.completedAt)
-                  const m = months.find(x => x.key === `${d.getFullYear()}-${d.getMonth()}`)
-                  if (m) { m.count++; datedCount++ }
-                })
-                const maxCount = Math.max(1, ...months.map(m => m.count))
-                const sorted = [...achieved].sort((a, b) =>
-                  (b.completedAt ? Date.parse(b.completedAt) : 0) - (a.completedAt ? Date.parse(a.completedAt) : 0))
-                return (
-                  <section>
-                    <button
-                      onClick={() => setAchievedOpen(o => !o)} aria-expanded={achievedOpen}
-                      style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', margin: '0 0 12px' }}
-                    >
-                      <span style={{ ...T.kicker, fontSize: 10.5, color: c.faint }}>
-                        <span style={{ color: c.up }}>✓</span> Achieved · {achieved.length}
-                      </span>
-                      <span style={{ flex: 1 }} />
-                      <span aria-hidden="true" style={{ color: c.faint, fontSize: 13, transform: achievedOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s ease' }}>›</span>
-                    </button>
-
-                    {achievedOpen && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                        {/* histogram */}
-                        <div style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 12, padding: '14px 15px' }}>
-                          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
-                            <span style={{ ...T.kicker, fontSize: 10, color: c.faint }}>Achieved over time</span>
-                            <span style={{ flex: 1 }} />
-                            <span style={{ ...mono, fontSize: 11, color: c.up }}>{datedCount} in the last year</span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 86 }}>
-                            {months.map(m => (
-                              <div key={m.key} title={`${m.label}: ${m.count} achieved`} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
-                                <span style={{ ...mono, fontSize: 10, color: m.count ? c.text : 'transparent', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{m.count || '0'}</span>
-                                <div style={{ width: '100%', maxWidth: 26, height: `${Math.round((m.count / maxCount) * 56)}px`, minHeight: m.count ? 4 : 2, borderRadius: 5, background: m.count ? (m.current ? c.accent : c.up) : c.hair, transition: 'height .3s ease' }} />
-                                <span style={{ ...mono, fontSize: 9, color: m.current ? c.text : c.faint }}>{m.label}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                        {/* list of achieved goals, newest first */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                          {sorted.map(g => (
-                            <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 10, background: c.surface, border: `1px solid ${c.hair}` }}>
-                              <span aria-hidden="true" style={{ color: c.up, fontSize: 13, flexShrink: 0 }}>✓</span>
-                              <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
-                              <span style={{ ...mono, fontSize: 10, color: hz(g.horizon).color, whiteSpace: 'nowrap' }}>◆ {hz(g.horizon).label}</span>
-                              {g.completedAt && <span style={{ ...mono, fontSize: 10.5, color: c.faint, whiteSpace: 'nowrap' }}>{new Date(g.completedAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
-                              <MenuButton ariaLabel={`Achieved goal: ${g.title}`} entries={[
-                                { kind: 'item', label: 'Restore to active', onClick: () => updateGoal(g.id, { archived: false, status: 'Active' }) },
-                                { kind: 'divider' },
-                                { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
-                              ]} />
-                            </div>
-                          ))}
-                        </div>
+                    ) : (
+                      <div style={h.key === 'Horizon5'
+                        ? { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }
+                        : { display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {tierGoals.map(g =>
+                          h.key === 'Vision25' || h.key === 'Horizon5' ? visionCard(g, h.color)
+                          : h.key === 'Year' ? smartCard(g, h.color)
+                          : cadenceRow(g, h.color))}
                       </div>
                     )}
-                  </section>
+                  </div>
                 )
               })()}
+
+              {goalTab === 'achieved' && renderAchieved()}
             </div>
           )
         })()}
