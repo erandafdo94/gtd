@@ -1198,7 +1198,6 @@ export default function App() {
 
   // Goal ladder (server-backed, like habits — kept out of the State blob).
   const [goals, setGoals] = useState<Goal[]>([])
-  const [goalsLoading, setGoalsLoading] = useState(false)
   const [goalsErr, setGoalsErr] = useState(false)
   // New-goal modal form.
   const [newGoalOpen, setNewGoalOpen] = useState(false)
@@ -1606,7 +1605,6 @@ export default function App() {
   /* ----- goals: load + optimistic mutations (structured /api/goals API) ----- */
   const loadGoals = async () => {
     if (!auth || !SYNC_ON) return
-    setGoalsLoading(true)
     try {
       // Fetch everything (including archived) so the Achieved history has data;
       // the active ladder filters archived out client-side.
@@ -1614,7 +1612,6 @@ export default function App() {
       if (r && r.ok) { setGoals(await r.json() as Goal[]); setGoalsErr(false) }
       else if (r) setGoalsErr(true)
     } catch { setGoalsErr(true) }
-    finally { setGoalsLoading(false) }
   }
 
   // Fetch goals when the tab is opened (and once auth becomes available).
