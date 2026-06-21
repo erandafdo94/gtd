@@ -119,6 +119,7 @@ type Goal = {
   icon?: string | null
   sortOrder: number
   archived: boolean
+  completedAt?: string | null
   progressPct?: number | null
 }
 // Ordered top (farthest) → bottom (nearest). `metric` marks the SMART tiers that
@@ -1207,6 +1208,8 @@ export default function App() {
   const [ngDue, setNgDue] = useState('')
   const [ngParent, setNgParent] = useState('')
   const [ngBusy, setNgBusy] = useState(false)
+  // Achieved/history shelf (archived goals) — collapsed by default.
+  const [achievedOpen, setAchievedOpen] = useState(false)
 
   // auth / sync (optional)
   const [auth, setAuth] = useState<AuthState | null>(null)
@@ -1602,7 +1605,9 @@ export default function App() {
     if (!auth || !SYNC_ON) return
     setGoalsLoading(true)
     try {
-      const r = await authedFetch('/api/goals')
+      // Fetch everything (including archived) so the Achieved history has data;
+      // the active ladder filters archived out client-side.
+      const r = await authedFetch('/api/goals?archived=true')
       if (r && r.ok) { setGoals(await r.json() as Goal[]); setGoalsErr(false) }
       else if (r) setGoalsErr(true)
     } catch { setGoalsErr(true) }
@@ -3240,6 +3245,7 @@ export default function App() {
                   )}
                   <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
                     { kind: 'item', label: done ? 'Mark active' : 'Mark complete', onClick: () => updateGoal(g.id, { status: done ? 'Active' : 'Completed' }) },
+                    { kind: 'item', label: done ? 'Archive' : 'Achieve & archive', onClick: () => updateGoal(g.id, done ? { archived: true } : { status: 'Completed', archived: true }) },
                     { kind: 'divider' },
                     { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                   ]} />
@@ -3272,6 +3278,8 @@ export default function App() {
                 <span style={{ ...T.body, flex: 1, color: done ? c.dim : c.text, textDecoration: done ? 'line-through' : 'none' }}>{g.title}</span>
                 {parent && <span style={{ ...mono, fontSize: 10.5, color: c.accent, whiteSpace: 'nowrap' }}>↗ {parent.title}</span>}
                 <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
+                  { kind: 'item', label: done ? 'Archive' : 'Achieve & archive', onClick: () => updateGoal(g.id, done ? { archived: true } : { status: 'Completed', archived: true }) },
+                  { kind: 'divider' },
                   { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                 ]} />
               </div>
@@ -3287,6 +3295,8 @@ export default function App() {
                 {parentOf(g) && <div style={{ ...mono, fontSize: 10.5, color: c.accent, marginTop: 4 }}>↗ {parentOf(g)!.title}</div>}
               </div>
               <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
+                { kind: 'item', label: g.status === 'Completed' ? 'Archive' : 'Achieve & archive', onClick: () => updateGoal(g.id, g.status === 'Completed' ? { archived: true } : { status: 'Completed', archived: true }) },
+                { kind: 'divider' },
                 { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
               ]} />
             </div>
@@ -3350,6 +3360,81 @@ export default function App() {
                   </section>
                 )
               })}
+
+              {/* ===== Achieved / history shelf — archived goals + a monthly histogram ===== */}
+              {(() => {
+                const achieved = goals.filter(g => g.archived)
+                if (achieved.length === 0) return null
+                const hz = (k: GoalHorizon) => GOAL_HORIZONS.find(h => h.key === k)!
+                // Last 12 months, oldest → newest, bucketed by completion month.
+                const now = new Date()
+                const months = Array.from({ length: 12 }, (_, i) => {
+                  const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1)
+                  return { key: `${d.getFullYear()}-${d.getMonth()}`, label: d.toLocaleString('en', { month: 'short' }), count: 0, current: i === 11 }
+                })
+                let datedCount = 0
+                achieved.forEach(g => {
+                  if (!g.completedAt) return
+                  const d = new Date(g.completedAt)
+                  const m = months.find(x => x.key === `${d.getFullYear()}-${d.getMonth()}`)
+                  if (m) { m.count++; datedCount++ }
+                })
+                const maxCount = Math.max(1, ...months.map(m => m.count))
+                const sorted = [...achieved].sort((a, b) =>
+                  (b.completedAt ? Date.parse(b.completedAt) : 0) - (a.completedAt ? Date.parse(a.completedAt) : 0))
+                return (
+                  <section>
+                    <button
+                      onClick={() => setAchievedOpen(o => !o)} aria-expanded={achievedOpen}
+                      style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', margin: '0 0 12px' }}
+                    >
+                      <span style={{ ...T.kicker, fontSize: 10.5, color: c.faint }}>
+                        <span style={{ color: c.up }}>✓</span> Achieved · {achieved.length}
+                      </span>
+                      <span style={{ flex: 1 }} />
+                      <span aria-hidden="true" style={{ color: c.faint, fontSize: 13, transform: achievedOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s ease' }}>›</span>
+                    </button>
+
+                    {achievedOpen && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                        {/* histogram */}
+                        <div style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 12, padding: '14px 15px' }}>
+                          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
+                            <span style={{ ...T.kicker, fontSize: 10, color: c.faint }}>Achieved over time</span>
+                            <span style={{ flex: 1 }} />
+                            <span style={{ ...mono, fontSize: 11, color: c.up }}>{datedCount} in the last year</span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 86 }}>
+                            {months.map(m => (
+                              <div key={m.key} title={`${m.label}: ${m.count} achieved`} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, justifyContent: 'flex-end' }}>
+                                <span style={{ ...mono, fontSize: 10, color: m.count ? c.text : 'transparent', fontVariantNumeric: 'tabular-nums', lineHeight: 1 }}>{m.count || '0'}</span>
+                                <div style={{ width: '100%', maxWidth: 26, height: `${Math.round((m.count / maxCount) * 56)}px`, minHeight: m.count ? 4 : 2, borderRadius: 5, background: m.count ? (m.current ? c.accent : c.up) : c.hair, transition: 'height .3s ease' }} />
+                                <span style={{ ...mono, fontSize: 9, color: m.current ? c.text : c.faint }}>{m.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        {/* list of achieved goals, newest first */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {sorted.map(g => (
+                            <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 10, background: c.surface, border: `1px solid ${c.hair}` }}>
+                              <span aria-hidden="true" style={{ color: c.up, fontSize: 13, flexShrink: 0 }}>✓</span>
+                              <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
+                              <span style={{ ...mono, fontSize: 10, color: hz(g.horizon).color, whiteSpace: 'nowrap' }}>◆ {hz(g.horizon).label}</span>
+                              {g.completedAt && <span style={{ ...mono, fontSize: 10.5, color: c.faint, whiteSpace: 'nowrap' }}>{new Date(g.completedAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+                              <MenuButton ariaLabel={`Achieved goal: ${g.title}`} entries={[
+                                { kind: 'item', label: 'Restore to active', onClick: () => updateGoal(g.id, { archived: false, status: 'Active' }) },
+                                { kind: 'divider' },
+                                { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
+                              ]} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </section>
+                )
+              })()}
             </div>
           )
         })()}
