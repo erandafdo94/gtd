@@ -119,6 +119,7 @@ type Goal = {
   icon?: string | null
   sortOrder: number
   archived: boolean
+  createdAt?: string | null
   completedAt?: string | null
   progressPct?: number | null
 }
@@ -263,6 +264,14 @@ const dayIndex = () => {
   return Math.floor((d.getTime() - new Date(d.getFullYear(), 0, 0).getTime()) / 86400000)
 }
 const daysOld = (ts: number) => Math.floor((Date.now() - ts) / 86400000)
+// End of the current calendar month / Mon–Sun week, as a local Date. Used to
+// default cadence-goal due dates and to roll overdue goals forward a period.
+const endOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth() + 1, 0)
+const endOfWeek = (d: Date) => {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  x.setDate(x.getDate() + ((7 - x.getDay()) % 7))   // advance to the upcoming Sunday
+  return x
+}
 const defaultEnergy = (): Energy => {
   const h = new Date().getHours()
   if (h >= 6 && h < 12) return 'High'
@@ -273,6 +282,14 @@ const fmtClock = (s: number) =>
   `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 // Compact number for goal progress: drop trailing decimals, add thousands sep.
 const fmtNum = (n: number) => Math.round(n).toLocaleString()
+// Human "how long it took" between two ISO timestamps (created → completed).
+const fmtDuration = (fromIso: string, toIso: string) => {
+  const days = Math.max(0, Math.round((Date.parse(toIso) - Date.parse(fromIso)) / 86400000))
+  if (days === 0) return 'same day'
+  if (days < 60) return `${days} day${days === 1 ? '' : 's'}`
+  const months = Math.round(days / 30.44)
+  return `~${months} month${months === 1 ? '' : 's'}`
+}
 
 /* ----- bedtime / wind-down ----- */
 // Wind-down lead times offered in Settings (minutes before bedtime).
@@ -1199,10 +1216,12 @@ export default function App() {
   // Goal ladder (server-backed, like habits — kept out of the State blob).
   const [goals, setGoals] = useState<Goal[]>([])
   const [goalsErr, setGoalsErr] = useState(false)
-  // New-goal modal form.
+  // Goal modal form — shared by "new goal" and "edit goal" (ngEditId set = editing).
   const [newGoalOpen, setNewGoalOpen] = useState(false)
+  const [ngEditId, setNgEditId] = useState<string | null>(null)
   const [ngHorizon, setNgHorizon] = useState<GoalHorizon>('Year')
   const [ngTitle, setNgTitle] = useState('')
+  const [ngDesc, setNgDesc] = useState('')
   const [ngTarget, setNgTarget] = useState('')
   const [ngCurrent, setNgCurrent] = useState('')
   const [ngUnit, setNgUnit] = useState('')
@@ -1701,29 +1720,54 @@ export default function App() {
     setNhName(''); setNhKind('Daily'); setNhTarget(3); setNhColor(PROJECT_COLORS[0])
   }
 
-  // Open the new-goal modal pre-set to a horizon (the + on each tier).
+  // Open the modal to create a new goal pre-set to a horizon (the + on each tier).
   const openNewGoal = (horizon: GoalHorizon) => {
+    setNgEditId(null)
     setNgHorizon(horizon)
-    setNgTitle(''); setNgTarget(''); setNgCurrent(''); setNgUnit(''); setNgDue(''); setNgParent('')
+    setNgTitle(''); setNgDesc(''); setNgTarget(''); setNgCurrent(''); setNgUnit(''); setNgDue(''); setNgParent('')
     setNewGoalOpen(true)
   }
+
+  // Open the same modal pre-filled to edit an existing goal.
+  const openEditGoal = (g: Goal) => {
+    setNgEditId(g.id)
+    setNgHorizon(g.horizon)
+    setNgTitle(g.title)
+    setNgDesc(g.description ?? '')
+    setNgTarget(g.targetValue != null ? String(g.targetValue) : '')
+    setNgCurrent(g.currentValue != null ? String(g.currentValue) : '')
+    setNgUnit(g.unit ?? '')
+    setNgDue(g.dueDate ?? '')
+    setNgParent(g.parentGoalId ?? '')
+    setNewGoalOpen(true)
+  }
+
+  const closeGoalModal = () => { setNewGoalOpen(false); setNgEditId(null) }
 
   const submitNewGoal = async () => {
     const title = ngTitle.trim()
     if (!title) return
     const metric = GOAL_HORIZONS.find(h => h.key === ngHorizon)!.metric
-    setNgBusy(true)
-    await createGoal({
+    // New monthly/weekly goals default their due date to the end of the period, so
+    // they naturally surface as overdue at period close and can be rolled forward.
+    let dueDate = metric && ngDue ? ngDue : null
+    if (!ngEditId && !dueDate && (ngHorizon === 'Week' || ngHorizon === 'Month'))
+      dueDate = dateKey(ngHorizon === 'Week' ? endOfWeek(new Date()) : endOfMonth(new Date()))
+    const fields = {
       title,
       horizon: ngHorizon,
+      description: ngDesc.trim() || null,
       parentGoalId: ngParent || null,
       targetValue: metric && ngTarget.trim() ? Number(ngTarget) : null,
       currentValue: metric && ngCurrent.trim() ? Number(ngCurrent) : null,
       unit: metric && ngUnit.trim() ? ngUnit.trim() : null,
-      dueDate: metric && ngDue ? ngDue : null,
-    })
+      dueDate,
+    }
+    setNgBusy(true)
+    if (ngEditId) await updateGoal(ngEditId, fields)
+    else await createGoal(fields)
     setNgBusy(false)
-    setNewGoalOpen(false)
+    closeGoalModal()
   }
 
   // One habit row — Reminders-style: check circle / progress ring, name, streak,
@@ -3227,6 +3271,22 @@ export default function App() {
           const byHorizon = (k: GoalHorizon) => active.filter(g => g.horizon === k)
           const parentOf = (g: Goal) => g.parentGoalId ? active.find(x => x.id === g.parentGoalId) : undefined
 
+          // Overdue = a live goal whose due date has passed. Roll-forward bumps the
+          // due date to the end of the next period (next week for weekly goals, else
+          // next month) via the existing PUT — no schema or new endpoint needed.
+          const today0 = new Date(); today0.setHours(0, 0, 0, 0)
+          const isOverdue = (g: Goal) =>
+            !g.archived && g.status !== 'Completed' && !!g.dueDate && new Date(g.dueDate + 'T00:00:00') < today0
+          const overdue = active.filter(isOverdue)
+          const moveLabel = (g: Goal) => g.horizon === 'Week' ? 'Move to next week' : 'Move to next month'
+          const bumpToNextPeriod = (g: Goal) => {
+            const now = new Date()
+            const next = g.horizon === 'Week'
+              ? endOfWeek(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7))
+              : endOfMonth(new Date(now.getFullYear(), now.getMonth() + 1, 1))
+            updateGoal(g.id, { dueDate: dateKey(next) })
+          }
+
           // SMART goal card (Year tier): progress bar + measurable chips + up-link.
           const smartCard = (g: Goal, tierColor: string) => {
             const dot = g.color || tierColor
@@ -3236,7 +3296,7 @@ export default function App() {
             return (
               <div key={g.id} style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 12, padding: '13px 15px', opacity: done ? 0.6 : 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: pct != null ? 9 : 0 }}>
-                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: dot, flexShrink: 0 }} />
+                  <CheckCircle done={done} color={dot} onClick={() => updateGoal(g.id, { status: 'Completed', archived: true })} />
                   <span style={{ ...T.taskTitle, flex: 1, color: c.text, textDecoration: done ? 'line-through' : 'none' }}>{g.title}</span>
                   {pct != null && g.targetValue != null && (
                     <span style={{ ...mono, fontSize: 12, color: done ? c.up : c.dim }}>
@@ -3244,8 +3304,8 @@ export default function App() {
                     </span>
                   )}
                   <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
-                    { kind: 'item', label: done ? 'Mark active' : 'Mark complete', onClick: () => updateGoal(g.id, { status: done ? 'Active' : 'Completed' }) },
-                    { kind: 'item', label: done ? 'Archive' : 'Achieve & archive', onClick: () => updateGoal(g.id, done ? { archived: true } : { status: 'Completed', archived: true }) },
+                    { kind: 'item', label: 'Edit', onClick: () => openEditGoal(g) },
+                    ...(isOverdue(g) ? [{ kind: 'item' as const, label: moveLabel(g), onClick: () => bumpToNextPeriod(g) }] : []),
                     { kind: 'divider' },
                     { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                   ]} />
@@ -3256,7 +3316,9 @@ export default function App() {
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {g.dueDate && <Tag>by {g.dueDate}</Tag>}
+                  {g.dueDate && (isOverdue(g)
+                    ? <span style={{ ...mono, fontSize: 11, fontWeight: 700, letterSpacing: '0.01em', borderRadius: 7, padding: '3px 8px', background: c.surface2, color: c.down, whiteSpace: 'nowrap' }}>overdue · {g.dueDate}</span>
+                    : <Tag>by {g.dueDate}</Tag>)}
                   {pct != null && <Tag>{pct}%</Tag>}
                   {parent && (
                     <span style={{ ...mono, fontSize: 11, fontWeight: 700, borderRadius: 7, padding: '3px 8px', background: c.accentSoft, color: c.accent, whiteSpace: 'nowrap' }}>
@@ -3274,11 +3336,13 @@ export default function App() {
             const parent = parentOf(g)
             return (
               <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 11px', borderRadius: 10, background: c.surface2, border: `1px solid ${c.hair}` }}>
-                <CheckCircle done={done} color={g.color || tierColor} onClick={() => updateGoal(g.id, { status: done ? 'Active' : 'Completed' })} />
+                <CheckCircle done={done} color={g.color || tierColor} onClick={() => updateGoal(g.id, { status: 'Completed', archived: true })} />
                 <span style={{ ...T.body, flex: 1, color: done ? c.dim : c.text, textDecoration: done ? 'line-through' : 'none' }}>{g.title}</span>
+                {isOverdue(g) && <span style={{ ...mono, fontSize: 10, fontWeight: 700, letterSpacing: '0.02em', color: c.down, whiteSpace: 'nowrap' }}>OVERDUE</span>}
                 {parent && <span style={{ ...mono, fontSize: 10.5, color: c.accent, whiteSpace: 'nowrap' }}>↗ {parent.title}</span>}
                 <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
-                  { kind: 'item', label: done ? 'Archive' : 'Achieve & archive', onClick: () => updateGoal(g.id, done ? { archived: true } : { status: 'Completed', archived: true }) },
+                  { kind: 'item', label: 'Edit', onClick: () => openEditGoal(g) },
+                  ...(isOverdue(g) ? [{ kind: 'item' as const, label: moveLabel(g), onClick: () => bumpToNextPeriod(g) }] : []),
                   { kind: 'divider' },
                   { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                 ]} />
@@ -3289,13 +3353,14 @@ export default function App() {
           // Vision/Horizon card (no metric): a left-accented aspiration card.
           const visionCard = (g: Goal, tierColor: string) => (
             <div key={g.id} style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderLeft: `3px solid ${g.color || tierColor}`, borderRadius: '0 12px 12px 0', padding: '12px 14px', display: 'flex', alignItems: 'flex-start', gap: 9 }}>
+              <CheckCircle done={g.status === 'Completed'} color={g.color || tierColor} onClick={() => updateGoal(g.id, { status: 'Completed', archived: true })} />
               <div style={{ flex: 1 }}>
-                <div style={{ ...T.taskTitle, color: c.text, marginBottom: g.description ? 3 : 0 }}>{g.title}</div>
+                <div style={{ ...T.taskTitle, color: c.text, marginBottom: g.description ? 3 : 0, textDecoration: g.status === 'Completed' ? 'line-through' : 'none' }}>{g.title}</div>
                 {g.description && <div style={{ ...T.body, fontSize: 12.5, color: c.dim }}>{g.description}</div>}
                 {parentOf(g) && <div style={{ ...mono, fontSize: 10.5, color: c.accent, marginTop: 4 }}>↗ {parentOf(g)!.title}</div>}
               </div>
               <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
-                { kind: 'item', label: g.status === 'Completed' ? 'Archive' : 'Achieve & archive', onClick: () => updateGoal(g.id, g.status === 'Completed' ? { archived: true } : { status: 'Completed', archived: true }) },
+                { kind: 'item', label: 'Edit', onClick: () => openEditGoal(g) },
                 { kind: 'divider' },
                 { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
               ]} />
@@ -3331,12 +3396,18 @@ export default function App() {
             const maxCount = Math.max(1, ...months.map(m => m.count))
             const sorted = [...achieved].sort((a, b) =>
               (b.completedAt ? Date.parse(b.completedAt) : 0) - (a.completedAt ? Date.parse(a.completedAt) : 0))
+            // Average time-to-finish across goals that carry both timestamps.
+            const withDur = achieved.filter(g => g.createdAt && g.completedAt)
+            const avgDays = withDur.length
+              ? Math.round(withDur.reduce((s, g) => s + Math.max(0, (Date.parse(g.completedAt!) - Date.parse(g.createdAt!)) / 86400000), 0) / withDur.length)
+              : null
             return (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                 <div style={{ background: c.surface2, border: `1px solid ${c.hair}`, borderRadius: 12, padding: '14px 15px' }}>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
                     <span style={{ ...T.kicker, fontSize: 10, color: c.faint }}>Achieved over time</span>
                     <span style={{ flex: 1 }} />
+                    {avgDays != null && <span style={{ ...mono, fontSize: 11, color: c.dim }}>avg {avgDays} day{avgDays === 1 ? '' : 's'} to finish</span>}
                     <span style={{ ...mono, fontSize: 11, color: c.up }}>{datedCount} in the last year</span>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 86 }}>
@@ -3355,6 +3426,7 @@ export default function App() {
                       <span aria-hidden="true" style={{ color: c.up, fontSize: 13, flexShrink: 0 }}>✓</span>
                       <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
                       <span style={{ ...mono, fontSize: 10, color: hz(g.horizon).color, whiteSpace: 'nowrap' }}>◆ {hz(g.horizon).label}</span>
+                      {g.createdAt && g.completedAt && <Tag>took {fmtDuration(g.createdAt, g.completedAt)}</Tag>}
                       {g.completedAt && <span style={{ ...mono, fontSize: 10.5, color: c.faint, whiteSpace: 'nowrap' }}>{new Date(g.completedAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
                       <MenuButton ariaLabel={`Achieved goal: ${g.title}`} entries={[
                         { kind: 'item', label: 'Restore to active', onClick: () => updateGoal(g.id, { archived: false, status: 'Active' }) },
@@ -3377,6 +3449,29 @@ export default function App() {
                 {goalsErr && <span style={{ ...mono, fontSize: 10, color: c.down }}>sync error</span>}
                 <Btn size="sm" variant="primary" onClick={() => openNewGoal(goalTab === 'achieved' ? 'Week' : goalTab)}>+ New goal</Btn>
               </div>
+
+              {/* overdue band — anything past its due date, with one-tap roll-forward */}
+              {overdue.length > 0 && (
+                <div style={{ background: c.surface2, border: `1px solid ${c.down}`, borderRadius: 12, padding: '12px 14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <span style={{ ...T.kicker, fontSize: 10, color: c.down }}>Overdue</span>
+                    <span style={{ ...mono, fontSize: 11, color: c.down, fontVariantNumeric: 'tabular-nums' }}>{overdue.length}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                    {overdue.map(g => {
+                      const h = GOAL_HORIZONS.find(x => x.key === g.horizon)!
+                      return (
+                        <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: c.surface, border: `1px solid ${c.hair}`, borderRadius: 9, padding: '8px 10px' }}>
+                          <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
+                          <span style={{ ...mono, fontSize: 10, color: h.color, whiteSpace: 'nowrap' }}>◆ {h.label}</span>
+                          <span style={{ ...mono, fontSize: 10.5, color: c.down, whiteSpace: 'nowrap' }}>due {g.dueDate}</span>
+                          <Btn size="sm" variant="soft" onClick={() => bumpToNextPeriod(g)}>{moveLabel(g)}</Btn>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* horizon tabs — nearest first, then the achievement history */}
               <div role="tablist" aria-label="Goal horizons" style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 2 }}>
@@ -3977,14 +4072,14 @@ export default function App() {
       {/* ---------- New goal modal ---------- */}
       {newGoalOpen && (() => {
         const tier = GOAL_HORIZONS.find(h => h.key === ngHorizon)!
-        // Parent options = goals one tier up (the up-link target).
-        const parentOpts = tier.parent ? goals.filter(g => !g.archived && g.horizon === tier.parent) : []
+        // Parent options = goals one tier up (the up-link target), never the goal itself.
+        const parentOpts = tier.parent ? goals.filter(g => !g.archived && g.horizon === tier.parent && g.id !== ngEditId) : []
         const inStyle: CSSProperties = { width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10, border: `1px solid ${c.line}`, background: c.surface2, color: c.text, fontFamily: 'var(--sans)', fontSize: 14 }
         const lbl: CSSProperties = { ...T.kicker, fontSize: 9.5, color: c.faint, display: 'block', marginBottom: 6 }
         return (
           <div
-            role="dialog" aria-modal="true" aria-label="New goal"
-            onClick={() => setNewGoalOpen(false)}
+            role="dialog" aria-modal="true" aria-label={ngEditId ? 'Edit goal' : 'New goal'}
+            onClick={closeGoalModal}
             style={{ position: 'fixed', inset: 0, zIndex: 120, background: 'rgba(0,0,0,.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
           >
             <div
@@ -3993,8 +4088,8 @@ export default function App() {
               style={{ width: 400, maxWidth: '100%', maxHeight: '88vh', overflowY: 'auto', background: c.surface, border: `1px solid ${c.line}`, borderRadius: 16, boxShadow: 'var(--shadow-lift)', padding: 22 }}
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-                <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>New goal</h2>
-                <button onClick={() => setNewGoalOpen(false)} aria-label="Close" className="fr-press" style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
+                <h2 style={{ fontFamily: 'var(--sans)', fontSize: 17, fontWeight: 700, letterSpacing: '-0.01em', margin: 0, color: c.text }}>{ngEditId ? 'Edit goal' : 'New goal'}</h2>
+                <button onClick={closeGoalModal} aria-label="Close" className="fr-press" style={{ width: 28, height: 28, borderRadius: 8, padding: 0, background: 'transparent', border: 'none', color: c.dim, cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>×</button>
               </div>
               <form onSubmit={e => { e.preventDefault(); submitNewGoal() }}>
                 <label style={lbl}>Horizon</label>
@@ -4018,6 +4113,18 @@ export default function App() {
                   value={ngTitle} onChange={e => setNgTitle(e.target.value)}
                   style={{ ...inStyle, marginBottom: 14 }}
                 />
+
+                {!tier.metric && (
+                  <div style={{ marginBottom: 14 }}>
+                    <label style={lbl}>Notes <span style={{ textTransform: 'none', letterSpacing: 0, color: c.faint }}>(optional)</span></label>
+                    <textarea
+                      className="fr-in" rows={2}
+                      placeholder="Why this matters — the north star behind it."
+                      value={ngDesc} onChange={e => setNgDesc(e.target.value)}
+                      style={{ ...inStyle, resize: 'vertical', lineHeight: 1.5 }}
+                    />
+                  </div>
+                )}
 
                 {tier.metric && (
                   <>
@@ -4062,7 +4169,7 @@ export default function App() {
                   className="fr-btn"
                   style={{ width: '100%', padding: '10px 12px', borderRadius: 10, background: c.accent, border: 'none', color: '#fff', fontSize: 14, fontWeight: 600, cursor: (ngBusy || !ngTitle.trim()) ? 'default' : 'pointer', opacity: (ngBusy || !ngTitle.trim()) ? 0.6 : 1 }}
                 >
-                  {ngBusy ? 'Adding…' : 'Add goal'}
+                  {ngBusy ? 'Saving…' : ngEditId ? 'Save changes' : 'Add goal'}
                 </button>
               </form>
             </div>
