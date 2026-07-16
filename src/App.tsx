@@ -209,6 +209,11 @@ const STATIONS: Station[] = [
 const ENERGIES: Energy[] = ['Low', 'Med', 'High']
 const ACCENT_OPTIONS = ['#ff5a36', '#4f8cff', '#2ad17f', '#9a6bff']
 
+// Selectable windows for the deep-work stats chart.
+const STATS_RANGES = ['7d', '30d', '90d'] as const
+type StatsRange = typeof STATS_RANGES[number]
+const RANGE_DAYS: Record<StatsRange, number> = { '7d': 7, '30d': 30, '90d': 90 }
+
 // GTD-style project lanes. Ongoing is the active-focus lane and is hard-capped.
 // Maintenance is GTD's "area of responsibility" — perpetual upkeep that's live
 // but shouldn't compete for an Ongoing slot, so it's uncapped.
@@ -954,22 +959,27 @@ function OutcomeButton({
    STATS
    ===================================================================== */
 function StatsChart({ days, max }: { days: { k: string; label: string; v: number }[]; max: number }) {
+  // Past ~2 weeks the per-bar value labels and wide bars stop fitting, so we
+  // switch to a compact bar and thin out the axis labels.
+  const dense = days.length > 14
+  const labelEvery = days.length > 60 ? 14 : days.length > 14 ? 7 : 1
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 9, height: 96, paddingTop: 16 }}>
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: dense ? 3 : 9, height: 96, paddingTop: 16 }}>
       {days.map((d, i) => {
         const isToday = i === days.length - 1
         const has = d.v > 0
-        const h = Math.max(3, Math.round((d.v / max) * 74))
+        const h = Math.max(dense ? 2 : 3, Math.round((d.v / max) * 74))
+        const showLabel = isToday || (days.length - 1 - i) % labelEvery === 0
         return (
-          <div key={d.k} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 7, height: '100%', justifyContent: 'flex-end' }}>
-            <span style={{ ...mono, fontSize: 9.5, color: isToday ? c.accent : c.faint, fontWeight: 700, fontVariantNumeric: 'tabular-nums', opacity: has ? 1 : 0 }}>{d.v}</span>
+          <div key={d.k} title={`${d.k} · ${d.v} min`} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: dense ? 4 : 7, height: '100%', justifyContent: 'flex-end' }}>
+            {!dense && <span style={{ ...mono, fontSize: 9.5, color: isToday ? c.accent : c.faint, fontWeight: 700, fontVariantNumeric: 'tabular-nums', opacity: has ? 1 : 0 }}>{d.v}</span>}
             <div style={{
-              width: '100%', maxWidth: 30, height: h, borderRadius: '5px 5px 2px 2px',
+              width: '100%', maxWidth: dense ? 14 : 30, height: h, borderRadius: dense ? '3px 3px 1px 1px' : '5px 5px 2px 2px',
               background: isToday ? c.accent : (has ? c.surface3 : c.hair),
               boxShadow: isToday ? '0 0 16px -4px var(--accent-glow)' : 'none',
               transition: 'height .45s cubic-bezier(.2,.7,.2,1)',
             }} />
-            <span style={{ ...mono, fontSize: 9.5, color: isToday ? c.text2 : c.faint, fontWeight: isToday ? 700 : 400 }}>{d.label}</span>
+            <span style={{ ...mono, fontSize: 9.5, color: isToday ? c.text2 : c.faint, fontWeight: isToday ? 700 : 400, opacity: showLabel ? 1 : 0, whiteSpace: 'nowrap' }}>{showLabel ? d.label : ''}</span>
           </div>
         )
       })}
@@ -1194,6 +1204,7 @@ export default function App() {
   const [customize, setCustomize] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [statsOpen, setStatsOpen] = useState(false)
+  const [statsRange, setStatsRange] = useState<StatsRange>('7d')
 
   // Habit tracker (server-backed; deliberately kept out of the State blob so it
   // isn't double-synced through /api/state).
@@ -2128,17 +2139,21 @@ export default function App() {
     a.click()
   }
 
-  const last7 = [...Array(7)].map((_, i) => {
+  const statsDayCount = RANGE_DAYS[statsRange]
+  const statsDays = [...Array(statsDayCount)].map((_, i) => {
     const d = new Date()
-    d.setDate(d.getDate() - (6 - i))
+    d.setDate(d.getDate() - (statsDayCount - 1 - i))
     const k = dateKey(d)
     return {
       k,
-      label: d.toLocaleDateString('en', { weekday: 'narrow' }),
+      // Weekday initials read well for a week; longer windows use day-of-month.
+      label: statsDayCount <= 7
+        ? d.toLocaleDateString('en', { weekday: 'narrow' })
+        : String(d.getDate()),
       v: state.stats[k]?.mins ?? 0,
     }
   })
-  const maxMins = Math.max(...last7.map(d => d.v), 1)
+  const statsMaxMins = Math.max(...statsDays.map(d => d.v), 1)
 
   const inFocus = timer.phase === 'work' && timer.running
   const di = dayIndex()
@@ -2328,14 +2343,14 @@ export default function App() {
 
   /* ----- widgets ----- */
   const wWord = state.widgets.word && (
-    <Card label="Word of the day" dim={inFocus} compact style={{ minWidth: 0 }}>
+    <Card label="Word of the day" compact style={{ minWidth: 0 }}>
       <div style={{ ...T.word, fontSize: 17, color: c.text }}>{WORDS[di % WORDS.length][0]}</div>
       <div style={{ ...T.body, fontSize: 11.5, lineHeight: 1.45, color: c.dim, marginTop: 3 }}>{WORDS[di % WORDS.length][1]}</div>
     </Card>
   )
 
   const wTip = state.widgets.tip && (
-    <Card label="Learning tip" dim={inFocus} compact style={{ minWidth: 0 }}>
+    <Card label="Learning tip" compact style={{ minWidth: 0 }}>
       <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '-0.01em', color: c.text }}>
         {TIPS[tipIdx][0]}
       </div>
@@ -2443,10 +2458,13 @@ export default function App() {
         <StatBlock label="✗ Distracted" value={tStats.distracted} />
       </div>
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${c.hair}` }}>
-        <div style={{ ...T.kicker, fontSize: 9.5, color: c.faint, marginBottom: 2 }}>
-          Focus minutes · last 7 days
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+          <div style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>
+            Focus minutes · last {statsDayCount} days
+          </div>
+          <Segmented options={STATS_RANGES} value={statsRange} onChange={setStatsRange} />
         </div>
-        <StatsChart days={last7} max={maxMins} />
+        <StatsChart days={statsDays} max={statsMaxMins} />
       </div>
         </Card>
       </div>
@@ -2523,7 +2541,7 @@ export default function App() {
 
   /* ----- quick add card (top row) ----- */
   const qaCard = (
-    <Card label="Quick add" dim={inFocus} style={{ minWidth: 0 }}>
+    <Card label="Quick add" style={{ minWidth: 0 }}>
       <label className="fr-field" style={{ ...fieldStyle, minWidth: 0 }}>
         <span style={{ color: c.accent, fontSize: 17, fontWeight: 700, lineHeight: 1 }}>+</span>
         <input
@@ -2570,7 +2588,6 @@ export default function App() {
     <Card
       label="Today"
       right={`${todayTasks.filter(t => !t.done).length} open · ${todayTasks.length}/${TODAY_CAP}`}
-      dim={inFocus}
       style={{ minWidth: 0 }}
     >
       {todayTasks.length === 0 && (
@@ -2981,7 +2998,7 @@ export default function App() {
             {/* FOCUS ZONE — router hero stacked over the pomodoro */}
             <div className="fr-focuscol">
             {/* ROUTER */}
-            <Card label="Router" style={{ display: 'flex', flexDirection: 'column' }} dim={inFocus}>
+            <Card label="Router" style={{ display: 'flex', flexDirection: 'column' }}>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 <span style={{ ...T.kicker, fontSize: 9.5, color: c.faint }}>Energy</span>
                 <Segmented options={ENERGIES} value={energy} onChange={setEnergy} />
