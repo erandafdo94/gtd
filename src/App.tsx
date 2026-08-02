@@ -3323,6 +3323,7 @@ export default function App() {
                   <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
                     { kind: 'item', label: 'Edit', onClick: () => openEditGoal(g) },
                     ...(isOverdue(g) ? [{ kind: 'item' as const, label: moveLabel(g), onClick: () => bumpToNextPeriod(g) }] : []),
+                    { kind: 'item', label: 'Failed to achieve', onClick: () => updateGoal(g.id, { status: 'Abandoned', archived: true }) },
                     { kind: 'divider' },
                     { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                   ]} />
@@ -3360,6 +3361,7 @@ export default function App() {
                 <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
                   { kind: 'item', label: 'Edit', onClick: () => openEditGoal(g) },
                   ...(isOverdue(g) ? [{ kind: 'item' as const, label: moveLabel(g), onClick: () => bumpToNextPeriod(g) }] : []),
+                  { kind: 'item', label: 'Failed to achieve', onClick: () => updateGoal(g.id, { status: 'Abandoned', archived: true }) },
                   { kind: 'divider' },
                   { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                 ]} />
@@ -3378,6 +3380,7 @@ export default function App() {
               </div>
               <MenuButton ariaLabel={`Goal actions: ${g.title}`} entries={[
                 { kind: 'item', label: 'Edit', onClick: () => openEditGoal(g) },
+                { kind: 'item', label: 'Failed to achieve', onClick: () => updateGoal(g.id, { status: 'Abandoned', archived: true }) },
                 { kind: 'divider' },
                 { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
               ]} />
@@ -3438,20 +3441,27 @@ export default function App() {
                   </div>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {sorted.map(g => (
+                  {sorted.map(g => {
+                    const failed = g.status === 'Abandoned'
+                    return (
                     <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 10, background: c.surface, border: `1px solid ${c.hair}` }}>
-                      <span aria-hidden="true" style={{ color: c.up, fontSize: 13, flexShrink: 0 }}>✓</span>
+                      <span aria-hidden="true" style={{ color: failed ? c.down : c.up, fontSize: 13, flexShrink: 0 }}>{failed ? '✕' : '✓'}</span>
                       <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
                       <span style={{ ...mono, fontSize: 10, color: hz(g.horizon).color, whiteSpace: 'nowrap' }}>◆ {hz(g.horizon).label}</span>
-                      {g.createdAt && g.completedAt && <Tag>took {fmtDuration(g.createdAt, g.completedAt)}</Tag>}
-                      {g.completedAt && <span style={{ ...mono, fontSize: 10.5, color: c.faint, whiteSpace: 'nowrap' }}>{new Date(g.completedAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
-                      <MenuButton ariaLabel={`Achieved goal: ${g.title}`} entries={[
+                      {failed
+                        ? <span style={{ ...mono, fontSize: 10.5, color: c.down, whiteSpace: 'nowrap' }}>not achieved</span>
+                        : <>
+                            {g.createdAt && g.completedAt && <Tag>took {fmtDuration(g.createdAt, g.completedAt)}</Tag>}
+                            {g.completedAt && <span style={{ ...mono, fontSize: 10.5, color: c.faint, whiteSpace: 'nowrap' }}>{new Date(g.completedAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</span>}
+                          </>}
+                      <MenuButton ariaLabel={`${failed ? 'Failed' : 'Achieved'} goal: ${g.title}`} entries={[
                         { kind: 'item', label: 'Restore to active', onClick: () => updateGoal(g.id, { archived: false, status: 'Active' }) },
                         { kind: 'divider' },
                         { kind: 'item', label: 'Delete', danger: true, onClick: () => deleteGoal(g.id) },
                       ]} />
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             )
