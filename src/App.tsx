@@ -1803,39 +1803,45 @@ export default function App() {
     entries.push({ kind: 'divider' })
     entries.push({ kind: 'item', label: 'Delete', danger: true, onClick: () => deleteHabit(h.id) })
     return (
-      <div key={h.id} style={{
+      <div key={h.id} className="fr-habit-row" style={{
         display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px',
         border: `1px solid ${c.hair}`, borderRadius: 12, background: c.surface2,
       }}>
-        {weekly
-          ? <WeekRing count={h.thisWeekCount} target={h.targetCount} color={color} onClick={() => toggleToday(h)} />
-          : <CheckCircle done={h.doneToday} color={color} onClick={() => toggleToday(h)} />}
-        <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, flexShrink: 0 }} />
-        {renamingHabitId === h.id ? (
-          <span style={{ flex: 1, minWidth: 0 }}>
-            <InlineEdit
-              value={h.name}
-              style={{ fontSize: 15, width: '100%', boxSizing: 'border-box' }}
-              onCommit={(v) => { const t = v.trim(); if (t && t !== h.name) updateHabit(h.id, { name: t }); setRenamingHabitId(null) }}
-              onCancel={() => setRenamingHabitId(null)}
-            />
-            <span style={{ display: 'block', ...mono, fontSize: 10, color: c.faint, marginTop: 2 }}>{subtitle}</span>
-          </span>
-        ) : (
-          <button
-            className="fr-press"
-            onClick={() => openHistory(h)}
-            aria-label={`View history for ${h.name}`}
-            style={{ flex: 1, minWidth: 0, textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
-          >
-            <span style={{ display: 'block', ...T.taskTitle, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {h.icon ? `${h.icon} ` : ''}{h.name}
+        <div className="fr-habit-lead" style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0 }}>
+          {weekly
+            ? <WeekRing count={h.thisWeekCount} target={h.targetCount} color={color} onClick={() => toggleToday(h)} />
+            : <CheckCircle done={h.doneToday} color={color} onClick={() => toggleToday(h)} />}
+          <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, flexShrink: 0 }} />
+          {renamingHabitId === h.id ? (
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <InlineEdit
+                value={h.name}
+                style={{ fontSize: 15, width: '100%', boxSizing: 'border-box' }}
+                onCommit={(v) => { const t = v.trim(); if (t && t !== h.name) updateHabit(h.id, { name: t }); setRenamingHabitId(null) }}
+                onCancel={() => setRenamingHabitId(null)}
+              />
+              <span style={{ display: 'block', ...mono, fontSize: 10, color: c.faint, marginTop: 2 }}>{subtitle}</span>
             </span>
-            <span style={{ display: 'block', ...mono, fontSize: 10, color: c.faint, marginTop: 2 }}>{subtitle}</span>
-          </button>
-        )}
-        <DayStrip recentDates={h.recentDates} color={color} onToggle={(d, done) => toggleDate(h, d, done)} />
-        <MenuButton ariaLabel={`Options for ${h.name}`} entries={entries} />
+          ) : (
+            <button
+              className="fr-press"
+              onClick={() => openHistory(h)}
+              aria-label={`View history for ${h.name}`}
+              style={{ flex: 1, minWidth: 0, textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+            >
+              <span style={{ display: 'block', ...T.taskTitle, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {h.icon ? `${h.icon} ` : ''}{h.name}
+              </span>
+              <span style={{ display: 'block', ...mono, fontSize: 10, color: c.faint, marginTop: 2 }}>{subtitle}</span>
+            </button>
+          )}
+        </div>
+        <div className="fr-habit-days" style={{ display: 'flex', flexShrink: 0 }}>
+          <DayStrip recentDates={h.recentDates} color={color} onToggle={(d, done) => toggleDate(h, d, done)} />
+        </div>
+        <span className="fr-habit-menu" style={{ display: 'inline-flex', flexShrink: 0 }}>
+          <MenuButton ariaLabel={`Options for ${h.name}`} entries={entries} />
+        </span>
       </div>
     )
   }
@@ -2826,6 +2832,19 @@ export default function App() {
           .fr-ambient{display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:18px;}
           .fr-pomo{min-height:248px;}
         }
+        /* ---- narrow-screen density: keep the title readable by dropping the
+           wide trailing controls (habit day-strip, goal meta/buttons) onto a
+           second line instead of letting them crush the name to a sliver ---- */
+        @media (max-width:620px){
+          .fr-habit-row{flex-wrap:wrap; row-gap:9px;}
+          .fr-habit-menu{order:1;}
+          .fr-habit-days{order:2; flex-basis:100%; padding-left:33px; justify-content:flex-start;}
+          .fr-overdue-row{flex-wrap:wrap; row-gap:7px;}
+          .fr-overdue-title{flex:1 1 100% !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important;}
+          .fr-achieved-row{flex-wrap:wrap; row-gap:6px;}
+          .fr-achieved-head{flex:1 1 100% !important;}
+          .fr-achieved-title{white-space:normal !important; overflow:visible !important; text-overflow:clip !important;}
+        }
       `}</style>
 
       <SideNav
@@ -3444,9 +3463,11 @@ export default function App() {
                   {sorted.map(g => {
                     const failed = g.status === 'Abandoned'
                     return (
-                    <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 10, background: c.surface, border: `1px solid ${c.hair}` }}>
-                      <span aria-hidden="true" style={{ color: failed ? c.down : c.up, fontSize: 13, flexShrink: 0 }}>{failed ? '✕' : '✓'}</span>
-                      <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
+                    <div key={g.id} className="fr-achieved-row" style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 11px', borderRadius: 10, background: c.surface, border: `1px solid ${c.hair}` }}>
+                      <span className="fr-achieved-head" style={{ display: 'flex', alignItems: 'center', gap: 11, flex: 1, minWidth: 0 }}>
+                        <span aria-hidden="true" style={{ color: failed ? c.down : c.up, fontSize: 13, flexShrink: 0 }}>{failed ? '✕' : '✓'}</span>
+                        <span className="fr-achieved-title" style={{ ...T.body, flex: 1, minWidth: 0, color: c.dim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
+                      </span>
                       <span style={{ ...mono, fontSize: 10, color: hz(g.horizon).color, whiteSpace: 'nowrap' }}>◆ {hz(g.horizon).label}</span>
                       {failed
                         ? <span style={{ ...mono, fontSize: 10.5, color: c.down, whiteSpace: 'nowrap' }}>not achieved</span>
@@ -3488,8 +3509,8 @@ export default function App() {
                     {overdue.map(g => {
                       const h = GOAL_HORIZONS.find(x => x.key === g.horizon)!
                       return (
-                        <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: c.surface, border: `1px solid ${c.hair}`, borderRadius: 9, padding: '8px 10px' }}>
-                          <span style={{ ...T.body, flex: 1, minWidth: 0, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
+                        <div key={g.id} className="fr-overdue-row" style={{ display: 'flex', alignItems: 'center', gap: 10, background: c.surface, border: `1px solid ${c.hair}`, borderRadius: 9, padding: '8px 10px' }}>
+                          <span className="fr-overdue-title" style={{ ...T.body, flex: 1, minWidth: 0, color: c.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.title}</span>
                           <span style={{ ...mono, fontSize: 10, color: h.color, whiteSpace: 'nowrap' }}>◆ {h.label}</span>
                           <span style={{ ...mono, fontSize: 10.5, color: c.down, whiteSpace: 'nowrap' }}>due {g.dueDate}</span>
                           <Btn size="sm" variant="soft" onClick={() => bumpToNextPeriod(g)}>{moveLabel(g)}</Btn>
